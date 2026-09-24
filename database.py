@@ -361,3 +361,13 @@ def get_user_count() -> int:
     with get_conn() as conn:
         row = conn.execute("SELECT COUNT(*) as n FROM users").fetchone()
         return row["n"]
+
+
+def delete_all_user_data(user_id: int):
+    """Borra todo el historial del usuario (registros, presupuestos, meta y
+    uso de IA), pero mantiene su moneda e idioma configurados."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM transactions WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM budgets WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM goals WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM ai_usage WHERE user_id = ?", (user_id,))

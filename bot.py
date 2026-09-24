@@ -11,6 +11,7 @@ Comandos:
   /meta 500            - definir o ver tu meta de ahorro
   /exportar            - descargar todo tu historial en un archivo Excel
   /deshacer            - elimina tu ultimo registro
+  /borrartodo          - elimina TODO tu historial (con confirmacion)
   /idioma es|en        - elegir idioma (afecta el mensaje de bienvenida)
   /ayuda               - vuelve a mostrar las instrucciones
 
@@ -76,6 +77,7 @@ WELCOME = (
     "/meta 500 - 🐷 define o revisa tu meta de ahorro\n"
     "/exportar - 📥 descarga todo tu historial en un archivo Excel\n"
     "/deshacer - ↩️ elimina tu ultimo registro si te equivocaste\n"
+    "/borrartodo - 🗑️ elimina TODO tu historial (con confirmacion)\n"
     "/idioma en - 🌐 cambia el idioma (es/en)\n"
     "/ayuda - ❓ vuelve a mostrar este mensaje\n\n"
     "🤖 La categoria de cada registro la decide una IA. Por eso, despues de "
@@ -101,6 +103,7 @@ WELCOME_EN = (
     "/meta 500 - 🐷 set or check your savings goal\n"
     "/exportar - 📥 download your full history as an Excel file\n"
     "/deshacer - ↩️ undo your last entry if you made a mistake\n"
+    "/borrartodo - 🗑️ delete ALL your data (asks to confirm)\n"
     "/idioma es - 🌐 switch language (es/en)\n"
     "/ayuda - ❓ show this message again\n\n"
     "🤖 The category for each entry is chosen by AI. That's why, after each "
@@ -119,6 +122,7 @@ BOT_COMMANDS = [
     BotCommand(command="meta", description="Definir o ver tu meta de ahorro"),
     BotCommand(command="exportar", description="Descargar tu historial en Excel"),
     BotCommand(command="deshacer", description="Eliminar tu ultimo registro"),
+    BotCommand(command="borrartodo", description="Eliminar TODO tu historial"),
     BotCommand(command="idioma", description="Cambiar idioma (es/en)"),
     BotCommand(command="ayuda", description="Ver los comandos disponibles"),
 ]
@@ -462,6 +466,40 @@ async def cmd_undo(message: Message):
         f"↩️ Listo, elimine tu ultimo registro: {row['kind']} de "
         f"{row['amount']:.2f} {currency} en \"{row['category']}\"."
     )
+
+
+@dp.message(Command("borrartodo"))
+async def cmd_delete_all(message: Message):
+    db.ensure_user(message.from_user.id, message.from_user.username)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="⚠️ Si, borrar todo", callback_data="delall:confirm"),
+            InlineKeyboardButton(text="Cancelar", callback_data="delall:cancel"),
+        ]]
+    )
+    await message.answer(
+        "⚠️ Esto va a borrar TODOS tus registros, presupuestos y tu meta de "
+        "ahorro. No se puede deshacer. Tu moneda e idioma se mantienen.\n\n"
+        "¿Seguro que quieres continuar?",
+        reply_markup=keyboard,
+    )
+
+
+@dp.callback_query(F.data == "delall:confirm")
+async def cb_delete_all_confirm(callback: CallbackQuery):
+    db.delete_all_user_data(callback.from_user.id)
+    if callback.message:
+        await callback.message.edit_text(
+            "🗑️ Listo, borre todos tus registros, presupuestos y tu meta de ahorro."
+        )
+    await callback.answer("Datos borrados")
+
+
+@dp.callback_query(F.data == "delall:cancel")
+async def cb_delete_all_cancel(callback: CallbackQuery):
+    if callback.message:
+        await callback.message.edit_text("Cancelado, no borre nada.")
+    await callback.answer()
 
 
 @dp.message(Command("admin"))
