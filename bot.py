@@ -743,140 +743,6 @@ def _confirm_keyboard(tx_id: int, kind: str) -> InlineKeyboardMarkup:
     )
 
 
-@dp.message(F.text)
-async def handle_text(message: Message):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    user_id = message.from_user.id
-
-    pending_tx_id = PENDING_CUSTOM_CATEGORY.pop(user_id, None)
-    if pending_tx_id is not None:
-        category = message.text.strip().lower()
-        if not category:
-            await message.answer("Ese nombre no es valido, intenta de nuevo.")
-            PENDING_CUSTOM_CATEGORY[user_id] = pending_tx_id
-            return
-        db.update_transaction_category(pending_tx_id, category)
-        await message.answer(f"Listo, lo cambie a la categoria \"{category}\".")
-        budgets = {b["category"]: b["limit_amount"] for b in db.get_budgets(user_id)}
-        if category in budgets:
-            await _check_budget_alert(message, user_id, category)
-        return
-
-    today = dt.datetime.utcnow().date().isoformat()
-
-    usage_before = db.get_ai_usage_count(user_id, today)
-    allow_ai = usage_before < AI_DAILY_LIMIT
-    result, used_ai = parse_message(message.text, allow_ai=allow_ai)
-    if used_ai:
-        db.increment_ai_usage(user_id, today)
-
-    if result is None:
-        await message.answer(
-            "No encontre un monto en tu mensaje. Intenta algo como "
-            "\"gaste 50 en el mercado\" o \"ingreso 300\"."
-        )
-        return
-
-    kind, amount, category = result
-    tx_id = db.add_transaction(user_id, kind, amount, category, message.text)
-    currency = db.get_currency(user_id)
-
-    verbo = "Registre un ingreso" if kind == "ingreso" else "Registre un gasto"
-    await message.answer(
-        f"{verbo} de {amount:.2f} {currency} en la categoria \"{category}\". "
-        f"¿Esta bien? (usa /resumen semana para ver tus totales)",
-        reply_markup=_confirm_keyboard(tx_id, kind),
-    )
-
-    if not allow_ai and usage_before == AI_DAILY_LIMIT:
-        await message.answer(
-            f"ℹ️ Hoy ya usaste tus {AI_DAILY_LIMIT} registros analizados con IA, "
-            "asi que por ahora sigo funcionando con un analisis mas simple "
-            "por palabras clave (un poco menos preciso). Manana vuelve a "
-            "tener el cupo completo."
-        )
-
-    if kind == "gasto":
-        await _check_budget_alert(message, user_id, category)
-    else:
-        db.adjust_pet_mood(user_id, 3)
-
-    await _check_registro_achievements(message, user_id)
-    await _check_goal_achievements(message, user_id)
-
-
-@dp.callback_query(F.data.startswith("catok:"))
-async def cb_category_ok(callback: CallbackQuery):
-    if callback.message:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.answer("Gracias, anotado.")
-
-
-@dp.callback_query(F.data.startswith("catno:"))
-async def cb_category_no(callback: CallbackQuery):
-    tx_id = callback.data.split(":", 1)[1]
-    buttons = [
-        InlineKeyboardButton(text=CATEGORY_LABELS[c], callback_data=f"setcat:{tx_id}:{c}")
-        for c in VALID_CATEGORIES
-    ]
-    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
-    rows.append([InlineKeyboardButton(text="✏️ Otra categoria", callback_data=f"catother:{tx_id}")])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
-    if callback.message:
-        await callback.message.edit_text("¿En cual categoria deberia ir?", reply_markup=keyboard)
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("catother:"))
-async def cb_category_other(callback: CallbackQuery):
-    tx_id = int(callback.data.split(":", 1)[1])
-    PENDING_CUSTOM_CATEGORY[callback.from_user.id] = tx_id
-    if callback.message:
-        await callback.message.edit_text(
-            "Escribeme el nombre de la categoria que quieres usar (ej. "
-            "\"curso de gastronomia\")."
-        )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("setcat:"))
-async def cb_category_set(callback: CallbackQuery):
-    _, tx_id, category = callback.data.split(":", 2)
-    db.update_transaction_category(int(tx_id), category)
-
-    if callback.message:
-        await callback.message.edit_text(f"Listo, lo cambie a la categoria \"{category}\".")
-    await callback.answer("Categoria actualizada")
-
-    if callback.message:
-        user_id = callback.from_user.id
-        budgets = {b["category"]: b["limit_amount"] for b in db.get_budgets(user_id)}
-        if category in budgets:
-            await _check_budget_alert(callback.message, user_id, category)
-
-
-@dp.callback_query(F.data.startswith("flipkind:"))
-async def cb_flip_kind(callback: CallbackQuery):
-    tx_id = int(callback.data.split(":", 1)[1])
-    tx = db.get_transaction(tx_id)
-    if tx is None:
-        await callback.answer("Ese registro ya no existe.")
-        return
-
-    new_kind = "ingreso" if tx["kind"] == "gasto" else "gasto"
-    db.update_transaction_kind(tx_id, new_kind)
-
-    if callback.message:
-        etiqueta = "ingreso" if new_kind == "ingreso" else "gasto"
-        await callback.message.edit_text(
-            f"Listo, lo cambie a {etiqueta} de {tx['amount']:.2f} en \"{tx['category']}\"."
-        )
-    await callback.answer("Tipo actualizado")
-
-    if callback.message and new_kind == "gasto":
-        await _check_budget_alert(callback.message, callback.from_user.id, tx["category"])
-
-
 @dp.message(Command("reto"))
 async def cmd_challenge(message: Message):
     db.ensure_user(message.from_user.id, message.from_user.username)
@@ -1073,6 +939,140 @@ async def cb_purchase_answer(callback: CallbackQuery):
     if callback.message:
         await callback.message.edit_text(veredicto)
     await callback.answer()
+
+
+@dp.message(F.text)
+async def handle_text(message: Message):
+    db.ensure_user(message.from_user.id, message.from_user.username)
+    user_id = message.from_user.id
+
+    pending_tx_id = PENDING_CUSTOM_CATEGORY.pop(user_id, None)
+    if pending_tx_id is not None:
+        category = message.text.strip().lower()
+        if not category:
+            await message.answer("Ese nombre no es valido, intenta de nuevo.")
+            PENDING_CUSTOM_CATEGORY[user_id] = pending_tx_id
+            return
+        db.update_transaction_category(pending_tx_id, category)
+        await message.answer(f"Listo, lo cambie a la categoria \"{category}\".")
+        budgets = {b["category"]: b["limit_amount"] for b in db.get_budgets(user_id)}
+        if category in budgets:
+            await _check_budget_alert(message, user_id, category)
+        return
+
+    today = dt.datetime.utcnow().date().isoformat()
+
+    usage_before = db.get_ai_usage_count(user_id, today)
+    allow_ai = usage_before < AI_DAILY_LIMIT
+    result, used_ai = parse_message(message.text, allow_ai=allow_ai)
+    if used_ai:
+        db.increment_ai_usage(user_id, today)
+
+    if result is None:
+        await message.answer(
+            "No encontre un monto en tu mensaje. Intenta algo como "
+            "\"gaste 50 en el mercado\" o \"ingreso 300\"."
+        )
+        return
+
+    kind, amount, category = result
+    tx_id = db.add_transaction(user_id, kind, amount, category, message.text)
+    currency = db.get_currency(user_id)
+
+    verbo = "Registre un ingreso" if kind == "ingreso" else "Registre un gasto"
+    await message.answer(
+        f"{verbo} de {amount:.2f} {currency} en la categoria \"{category}\". "
+        f"¿Esta bien? (usa /resumen semana para ver tus totales)",
+        reply_markup=_confirm_keyboard(tx_id, kind),
+    )
+
+    if not allow_ai and usage_before == AI_DAILY_LIMIT:
+        await message.answer(
+            f"ℹ️ Hoy ya usaste tus {AI_DAILY_LIMIT} registros analizados con IA, "
+            "asi que por ahora sigo funcionando con un analisis mas simple "
+            "por palabras clave (un poco menos preciso). Manana vuelve a "
+            "tener el cupo completo."
+        )
+
+    if kind == "gasto":
+        await _check_budget_alert(message, user_id, category)
+    else:
+        db.adjust_pet_mood(user_id, 3)
+
+    await _check_registro_achievements(message, user_id)
+    await _check_goal_achievements(message, user_id)
+
+
+@dp.callback_query(F.data.startswith("catok:"))
+async def cb_category_ok(callback: CallbackQuery):
+    if callback.message:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Gracias, anotado.")
+
+
+@dp.callback_query(F.data.startswith("catno:"))
+async def cb_category_no(callback: CallbackQuery):
+    tx_id = callback.data.split(":", 1)[1]
+    buttons = [
+        InlineKeyboardButton(text=CATEGORY_LABELS[c], callback_data=f"setcat:{tx_id}:{c}")
+        for c in VALID_CATEGORIES
+    ]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([InlineKeyboardButton(text="✏️ Otra categoria", callback_data=f"catother:{tx_id}")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+    if callback.message:
+        await callback.message.edit_text("¿En cual categoria deberia ir?", reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("catother:"))
+async def cb_category_other(callback: CallbackQuery):
+    tx_id = int(callback.data.split(":", 1)[1])
+    PENDING_CUSTOM_CATEGORY[callback.from_user.id] = tx_id
+    if callback.message:
+        await callback.message.edit_text(
+            "Escribeme el nombre de la categoria que quieres usar (ej. "
+            "\"curso de gastronomia\")."
+        )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("setcat:"))
+async def cb_category_set(callback: CallbackQuery):
+    _, tx_id, category = callback.data.split(":", 2)
+    db.update_transaction_category(int(tx_id), category)
+
+    if callback.message:
+        await callback.message.edit_text(f"Listo, lo cambie a la categoria \"{category}\".")
+    await callback.answer("Categoria actualizada")
+
+    if callback.message:
+        user_id = callback.from_user.id
+        budgets = {b["category"]: b["limit_amount"] for b in db.get_budgets(user_id)}
+        if category in budgets:
+            await _check_budget_alert(callback.message, user_id, category)
+
+
+@dp.callback_query(F.data.startswith("flipkind:"))
+async def cb_flip_kind(callback: CallbackQuery):
+    tx_id = int(callback.data.split(":", 1)[1])
+    tx = db.get_transaction(tx_id)
+    if tx is None:
+        await callback.answer("Ese registro ya no existe.")
+        return
+
+    new_kind = "ingreso" if tx["kind"] == "gasto" else "gasto"
+    db.update_transaction_kind(tx_id, new_kind)
+
+    if callback.message:
+        etiqueta = "ingreso" if new_kind == "ingreso" else "gasto"
+        await callback.message.edit_text(
+            f"Listo, lo cambie a {etiqueta} de {tx['amount']:.2f} en \"{tx['category']}\"."
+        )
+    await callback.answer("Tipo actualizado")
+
+    if callback.message and new_kind == "gasto":
+        await _check_budget_alert(callback.message, callback.from_user.id, tx["category"])
 
 
 def _seconds_until_next_weekly_report() -> float:
