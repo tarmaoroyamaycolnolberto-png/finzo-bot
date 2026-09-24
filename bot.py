@@ -12,6 +12,7 @@ Comandos:
   /exportar            - descargar todo tu historial en un archivo Excel
   /deshacer            - elimina tu ultimo registro
   /borrartodo          - elimina TODO tu historial (con confirmacion)
+  /feedback            - mandale un comentario o reporte a quien mantiene el bot
   /idioma es|en        - elegir idioma (afecta el mensaje de bienvenida)
   /ayuda               - vuelve a mostrar las instrucciones
 
@@ -72,12 +73,14 @@ WELCOME = (
     "/resumen mes - 🗓️ tus totales de los ultimos 30 dias\n"
     "/moneda USD - 💱 define tu moneda (ej. PEN, USD, MXN, EUR)\n"
     "/categorias - 🏷️ ve las categorias que se formaron segun tus registros\n"
-    "/presupuesto comida 200 - 🎯 define un limite mensual para una categoria\n"
+    "/presupuesto comida 200 - 🎯 define un limite mensual para una categoria "
+    "(puede ser libre, ej. \"curso de gastronomia\")\n"
     "/presupuesto - 📊 ver tus limites actuales\n"
-    "/meta 500 - 🐷 define o revisa tu meta de ahorro\n"
+    "/meta 500 viaje a Cusco - 🐷 define tu meta de ahorro y para que es\n"
     "/exportar - 📥 descarga todo tu historial en un archivo Excel\n"
     "/deshacer - ↩️ elimina tu ultimo registro si te equivocaste\n"
     "/borrartodo - 🗑️ elimina TODO tu historial (con confirmacion)\n"
+    "/feedback - 💬 mandame un comentario o reporte un problema\n"
     "/idioma en - 🌐 cambia el idioma (es/en)\n"
     "/ayuda - ❓ vuelve a mostrar este mensaje\n\n"
     "🤖 La categoria de cada registro la decide una IA. Por eso, despues de "
@@ -98,12 +101,14 @@ WELCOME_EN = (
     "/resumen mes - 🗓️ your totals for the last 30 days\n"
     "/moneda USD - 💱 set your currency (e.g. PEN, USD, MXN, EUR)\n"
     "/categorias - 🏷️ see the categories that formed from your own habits\n"
-    "/presupuesto comida 200 - 🎯 set a monthly limit for a category\n"
+    "/presupuesto comida 200 - 🎯 set a monthly limit for a category (can be "
+    "a free label, e.g. \"cooking course\")\n"
     "/presupuesto - 📊 view your current limits\n"
-    "/meta 500 - 🐷 set or check your savings goal\n"
+    "/meta 500 trip to Cusco - 🐷 set your savings goal and what it's for\n"
     "/exportar - 📥 download your full history as an Excel file\n"
     "/deshacer - ↩️ undo your last entry if you made a mistake\n"
     "/borrartodo - 🗑️ delete ALL your data (asks to confirm)\n"
+    "/feedback - 💬 send a comment or report a problem\n"
     "/idioma es - 🌐 switch language (es/en)\n"
     "/ayuda - ❓ show this message again\n\n"
     "🤖 The category for each entry is chosen by AI. That's why, after each "
@@ -123,6 +128,7 @@ BOT_COMMANDS = [
     BotCommand(command="exportar", description="Descargar tu historial en Excel"),
     BotCommand(command="deshacer", description="Eliminar tu ultimo registro"),
     BotCommand(command="borrartodo", description="Eliminar TODO tu historial"),
+    BotCommand(command="feedback", description="Enviar un comentario o reportar un problema"),
     BotCommand(command="idioma", description="Cambiar idioma (es/en)"),
     BotCommand(command="ayuda", description="Ver los comandos disponibles"),
 ]
@@ -154,6 +160,11 @@ CATEGORY_COLORS = {
 }
 
 CURRENCY_OPTIONS = ["PEN", "USD", "MXN", "EUR", "COP", "ARS"]
+
+# user_id -> tx_id: cuando el usuario eligio "Otra categoria" y le toca
+# escribir el nombre en su proximo mensaje (en vez de que se interprete
+# como un nuevo registro de gasto/ingreso).
+PENDING_CUSTOM_CATEGORY: dict[int, int] = {}
 
 
 @dp.message(Command("start"))
@@ -364,15 +375,14 @@ async def cmd_budget(message: Message, command: CommandObject):
     parts = command.args.strip().rsplit(" ", 1)
     if len(parts) != 2:
         await message.answer(
-            "Formato: /presupuesto categoria monto (ej. \"/presupuesto comida 200\")."
+            "Formato: /presupuesto categoria monto (ej. \"/presupuesto comida 200\" o "
+            "\"/presupuesto curso de gastronomia 8000\")."
         )
         return
 
     category, raw_amount = parts[0].strip().lower(), parts[1].strip()
-    if category not in VALID_CATEGORIES:
-        await message.answer(
-            "Categoria no reconocida. Usa una de: " + ", ".join(VALID_CATEGORIES)
-        )
+    if not category:
+        await message.answer("Falta el nombre de la categoria. Ejemplo: \"/presupuesto comida 200\".")
         return
     try:
         limit_amount = float(raw_amount.replace(",", "."))
@@ -381,8 +391,16 @@ async def cmd_budget(message: Message, command: CommandObject):
         return
 
     db.set_budget(message.from_user.id, category, limit_amount)
+    note = ""
+    if category not in VALID_CATEGORIES:
+        note = (
+            "\n\nComo \"{}\" no es una de las categorias que uso para clasificar tus "
+            "gastos automaticamente, este limite solo va a sumar los gastos que tu "
+            "asignes manualmente a esa categoria (con el boton \"Otra categoria\" "
+            "cuando registres uno)."
+        ).format(category)
     await message.answer(
-        f"Listo, tu limite mensual para \"{category}\" es {limit_amount:.2f} {currency}."
+        f"Listo, tu limite mensual para \"{category}\" es {limit_amount:.2f} {currency}.{note}"
     )
 
 
@@ -395,36 +413,45 @@ async def cmd_goal(message: Message, command: CommandObject):
         goal = db.get_goal(message.from_user.id)
         if not goal:
             await message.answer(
-                "No tienes una meta de ahorro todavia. Usa \"/meta 500\" para "
-                "definir cuanto quieres ahorrar."
+                "No tienes una meta de ahorro todavia. Usa \"/meta 500 viaje a "
+                "Cusco\" para definir cuanto quieres ahorrar y para que "
+                "(la descripcion es opcional)."
             )
             return
         net = db.get_net_since(message.from_user.id, goal["created_at"])
         target = goal["target_amount"]
+        label = goal["label"]
         pct = (net / target * 100) if target else 0
         pct = max(0, pct)
+        para = f" para \"{label}\"" if label else ""
         await message.answer(
-            f"🐷 Tu meta de ahorro es {target:.2f} {currency}.\n"
+            f"🐷 Tu meta{para} es ahorrar {target:.2f} {currency}.\n"
             f"Llevas ahorrado {net:.2f} {currency} ({pct:.0f}%) desde que la "
-            f"definiste.\nUsa \"/meta {target:.0f}\" de nuevo para reiniciarla "
-            f"con un nuevo monto."
+            f"definiste.\nUsa \"/meta {target:.0f}{' ' + label if label else ''}\" "
+            f"de nuevo para reiniciarla."
         )
         return
 
+    parts = command.args.strip().split(maxsplit=1)
     try:
-        target_amount = float(command.args.strip().replace(",", "."))
+        target_amount = float(parts[0].replace(",", "."))
     except ValueError:
-        await message.answer("Formato: /meta 500")
+        await message.answer(
+            "Formato: /meta 500 viaje a Cusco (la descripcion despues del "
+            "monto es opcional)."
+        )
         return
 
     if target_amount <= 0:
         await message.answer("El monto debe ser mayor que cero.")
         return
 
-    db.set_goal(message.from_user.id, target_amount)
+    label = parts[1].strip() if len(parts) > 1 else None
+    db.set_goal(message.from_user.id, target_amount, label)
+    para = f" para \"{label}\"" if label else ""
     await message.answer(
-        f"🐷 Meta guardada: ahorrar {target_amount:.2f} {currency}. Te ire "
-        f"mostrando tu avance con /meta."
+        f"🐷 Meta guardada: ahorrar {target_amount:.2f} {currency}{para}. Te "
+        f"ire mostrando tu avance con /meta."
     )
 
 
@@ -502,6 +529,30 @@ async def cb_delete_all_cancel(callback: CallbackQuery):
     await callback.answer()
 
 
+@dp.message(Command("feedback"))
+async def cmd_feedback(message: Message, command: CommandObject):
+    db.ensure_user(message.from_user.id, message.from_user.username)
+    if not command.args:
+        await message.answer(
+            "Cuentame que esta pasando o que te gustaria que mejore. Ejemplo:\n"
+            "/feedback la categoria de \"internet\" deberia ser servicios, no otros"
+        )
+        return
+
+    text = command.args.strip()
+    if ADMIN_TELEGRAM_ID:
+        who = f"@{message.from_user.username}" if message.from_user.username else f"id {message.from_user.id}"
+        try:
+            await message.bot.send_message(
+                ADMIN_TELEGRAM_ID,
+                f"💬 Feedback de {who}:\n{text}",
+            )
+        except Exception as exc:
+            logger.warning("No se pudo reenviar el feedback al admin: %s", exc)
+
+    await message.answer("Gracias, se lo hice llegar a quien mantiene el bot. 🙌")
+
+
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
     if not ADMIN_TELEGRAM_ID or str(message.from_user.id) != str(ADMIN_TELEGRAM_ID):
@@ -556,6 +607,21 @@ def _confirm_keyboard(tx_id: int, kind: str) -> InlineKeyboardMarkup:
 async def handle_text(message: Message):
     db.ensure_user(message.from_user.id, message.from_user.username)
     user_id = message.from_user.id
+
+    pending_tx_id = PENDING_CUSTOM_CATEGORY.pop(user_id, None)
+    if pending_tx_id is not None:
+        category = message.text.strip().lower()
+        if not category:
+            await message.answer("Ese nombre no es valido, intenta de nuevo.")
+            PENDING_CUSTOM_CATEGORY[user_id] = pending_tx_id
+            return
+        db.update_transaction_category(pending_tx_id, category)
+        await message.answer(f"Listo, lo cambie a la categoria \"{category}\".")
+        budgets = {b["category"]: b["limit_amount"] for b in db.get_budgets(user_id)}
+        if category in budgets:
+            await _check_budget_alert(message, user_id, category)
+        return
+
     today = dt.datetime.utcnow().date().isoformat()
 
     usage_before = db.get_ai_usage_count(user_id, today)
@@ -609,9 +675,22 @@ async def cb_category_no(callback: CallbackQuery):
         for c in VALID_CATEGORIES
     ]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([InlineKeyboardButton(text="✏️ Otra categoria", callback_data=f"catother:{tx_id}")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
     if callback.message:
         await callback.message.edit_text("¿En cual categoria deberia ir?", reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("catother:"))
+async def cb_category_other(callback: CallbackQuery):
+    tx_id = int(callback.data.split(":", 1)[1])
+    PENDING_CUSTOM_CATEGORY[callback.from_user.id] = tx_id
+    if callback.message:
+        await callback.message.edit_text(
+            "Escribeme el nombre de la categoria que quieres usar (ej. "
+            "\"curso de gastronomia\")."
+        )
     await callback.answer()
 
 

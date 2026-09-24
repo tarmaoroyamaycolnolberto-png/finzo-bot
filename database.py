@@ -73,16 +73,21 @@ def init_db():
             CREATE TABLE IF NOT EXISTS goals (
                 user_id INTEGER PRIMARY KEY,
                 target_amount REAL NOT NULL,
+                label TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
-        # Migracion suave: agrega la columna "language" si la base de datos
-        # viene de una version anterior que no la tenia.
-        try:
-            conn.execute("ALTER TABLE users ADD COLUMN language TEXT DEFAULT 'es'")
-        except sqlite3.OperationalError:
-            pass  # ya existe
+        # Migraciones suaves: agregan columnas nuevas si la base de datos
+        # viene de una version anterior que no las tenia.
+        for statement in (
+            "ALTER TABLE users ADD COLUMN language TEXT DEFAULT 'es'",
+            "ALTER TABLE goals ADD COLUMN label TEXT",
+        ):
+            try:
+                conn.execute(statement)
+            except sqlite3.OperationalError:
+                pass  # ya existe
 
 
 def ensure_user(user_id: int, username: str | None):
@@ -313,24 +318,25 @@ def get_total_ai_usage(day: str) -> int:
         return row["total"]
 
 
-def set_goal(user_id: int, target_amount: float):
+def set_goal(user_id: int, target_amount: float, label: str | None = None):
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO goals (user_id, target_amount, created_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO goals (user_id, target_amount, label, created_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(user_id) DO UPDATE SET
                 target_amount = excluded.target_amount,
+                label = excluded.label,
                 created_at = excluded.created_at
             """,
-            (user_id, target_amount),
+            (user_id, target_amount, label),
         )
 
 
 def get_goal(user_id: int):
     with get_conn() as conn:
         return conn.execute(
-            "SELECT target_amount, created_at FROM goals WHERE user_id = ?",
+            "SELECT target_amount, label, created_at FROM goals WHERE user_id = ?",
             (user_id,),
         ).fetchone()
 
