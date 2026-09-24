@@ -25,6 +25,7 @@ import os
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
+    BotCommand,
     BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
@@ -48,25 +49,35 @@ logger = logging.getLogger("finzo")
 dp = Dispatcher()
 
 WELCOME = (
-    "Hola, soy Finzo. Te ayudo a llevar el control de tus gastos e ingresos "
+    "🐱 Hola, soy Meow 💰 Te ayudo a llevar el control de tus gastos e ingresos "
     "sin salir de Telegram.\n\n"
-    "Solo escribeme lo que gastaste o recibiste, en tus propias palabras:\n"
+    "Solo escribeme lo que gastaste o recibiste, en tus propias palabras ✍️:\n"
     "  - \"gaste 50 en el mercado\"\n"
     "  - \"me pagaron 300\"\n"
     "  - \"spent $20 on transport\"\n\n"
-    "Comandos utiles:\n"
-    "/resumen semana - tus totales de los ultimos 7 dias\n"
-    "/resumen mes - tus totales de los ultimos 30 dias\n"
-    "/moneda USD - define tu moneda (ej. PEN, USD, MXN, EUR)\n"
-    "/categorias - ve las categorias que se formaron segun tus registros\n"
-    "/presupuesto comida 200 - define un limite mensual para una categoria\n"
-    "/presupuesto - ver tus limites actuales\n"
-    "/exportar - descarga todo tu historial en un archivo Excel\n"
-    "/ayuda - vuelve a mostrar este mensaje\n\n"
-    "La categoria de cada registro la decide una IA. Por eso, despues de "
+    "📋 Comandos utiles:\n"
+    "/resumen semana - 📅 tus totales de los ultimos 7 dias\n"
+    "/resumen mes - 🗓️ tus totales de los ultimos 30 dias\n"
+    "/moneda USD - 💱 define tu moneda (ej. PEN, USD, MXN, EUR)\n"
+    "/categorias - 🏷️ ve las categorias que se formaron segun tus registros\n"
+    "/presupuesto comida 200 - 🎯 define un limite mensual para una categoria\n"
+    "/presupuesto - 📊 ver tus limites actuales\n"
+    "/exportar - 📥 descarga todo tu historial en un archivo Excel\n"
+    "/ayuda - ❓ vuelve a mostrar este mensaje\n\n"
+    "🤖 La categoria de cada registro la decide una IA. Por eso, despues de "
     "cada uno te voy a preguntar si esta bien esa categoria; si marcas que "
-    "no, te dejo elegir la correcta con botones."
+    "no, te dejo elegir la correcta con botones 👇."
 )
+
+BOT_COMMANDS = [
+    BotCommand(command="start", description="Registrarte y ver la intro"),
+    BotCommand(command="resumen", description="Resumen semana o mes"),
+    BotCommand(command="moneda", description="Definir tu moneda"),
+    BotCommand(command="categorias", description="Ver tus categorias segun tus habitos"),
+    BotCommand(command="presupuesto", description="Ver o definir limites mensuales"),
+    BotCommand(command="exportar", description="Descargar tu historial en Excel"),
+    BotCommand(command="ayuda", description="Ver los comandos disponibles"),
+]
 
 VALID_CATEGORIES = [
     "comida", "transporte", "servicios", "salud",
@@ -338,6 +349,7 @@ async def main():
 
     db.init_db()
     bot = Bot(token=BOT_TOKEN)
+    await bot.set_my_commands(BOT_COMMANDS)
     logger.info("Finzo esta corriendo...")
     await dp.start_polling(bot)
 
