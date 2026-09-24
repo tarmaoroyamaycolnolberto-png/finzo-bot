@@ -162,16 +162,27 @@ def parse_message_ai(text: str):
     return kind, amount, category
 
 
-def parse_message(text: str):
-    """Punto de entrada que usa el bot: IA si esta disponible, si no, reglas."""
-    if _client is not None:
+def parse_message(text: str, allow_ai: bool = True):
+    """Punto de entrada que usa el bot: IA si esta disponible y permitida, si
+    no, reglas por palabras clave.
+
+    `allow_ai` lo decide el bot segun el limite diario de uso de IA por
+    usuario (ver AI_DAILY_LIMIT en bot.py), para controlar el costo de la
+    API cuando hay muchos usuarios activos.
+
+    Devuelve (resultado, uso_ia) donde uso_ia indica si realmente se llamo
+    a la IA (para que el bot sepa si debe contar esta llamada en la cuota).
+    """
+    if allow_ai and _client is not None:
         try:
-            return parse_message_ai(text)
+            return parse_message_ai(text), True
         except Exception as exc:
             # Sin internet, clave invalida, limite de uso, etc.: no se cae el bot,
             # pero se avisa en la terminal para poder diagnosticar la causa.
             logger.warning("Fallo la IA, usando reglas de respaldo: %s", exc)
-            return parse_message_rules(text)
+            return parse_message_rules(text), False
+    elif not allow_ai:
+        logger.info("Limite diario de IA alcanzado para este usuario; usando reglas.")
     else:
         logger.warning("ANTHROPIC_API_KEY no configurada o cliente no inicializado; usando reglas.")
-    return parse_message_rules(text)
+    return parse_message_rules(text), False

@@ -58,6 +58,31 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_usage (
+                user_id INTEGER NOT NULL,
+                day TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, day)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS goals (
+                user_id INTEGER PRIMARY KEY,
+                target_amount REAL NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        # Migracion suave: agrega la columna "language" si la base de datos
+        # viene de una version anterior que no la tenia.
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN language TEXT DEFAULT 'es'")
+        except sqlite3.OperationalError:
+            pass  # ya existe
 
 
 def ensure_user(user_id: int, username: str | None):
@@ -65,6 +90,30 @@ def ensure_user(user_id: int, username: str | None):
         conn.execute(
             "INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)",
             (user_id, username),
+        )
+
+
+def user_exists(user_id: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return row is not None
+
+
+def get_language(user_id: int) -> str:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT language FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return (row["language"] if row and row["language"] else "es")
+
+
+def set_language(user_id: int, lang: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE users SET language = ? WHERE user_id = ?",
+            (lang, user_id),
         )
 
 
@@ -102,6 +151,38 @@ def update_transaction_category(transaction_id: int, category: str):
             "UPDATE transactions SET category = ? WHERE id = ?",
             (category, transaction_id),
         )
+
+
+def update_transaction_kind(transaction_id: int, kind: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE transactions SET kind = ? WHERE id = ?",
+            (kind, transaction_id),
+        )
+
+
+def get_transaction(transaction_id: int):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT id, user_id, kind, amount, category FROM transactions WHERE id = ?",
+            (transaction_id,),
+        ).fetchone()
+
+
+def delete_last_transaction(user_id: int):
+    """Elimina el ultimo registro del usuario y lo devuelve (o None si no hay)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT id, kind, amount, category FROM transactions
+            WHERE user_id = ? ORDER BY id DESC LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute("DELETE FROM transactions WHERE id = ?", (row["id"],))
+        return row
 
 
 def get_categories_summary(user_id: int):
@@ -201,3 +282,82 @@ def get_all_transactions(user_id: int):
             """,
             (user_id,),
         ).fetchall()
+
+
+def get_ai_usage_count(user_id: int, day: str) -> int:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT count FROM ai_usage WHERE user_id = ? AND day = ?",
+            (user_id, day),
+        ).fetchone()
+        return row["count"] if row else 0
+
+
+def increment_ai_usage(user_id: int, day: str):
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO ai_usage (user_id, day, count) VALUES (?, ?, 1)
+            ON CONFLICT(user_id, day) DO UPDATE SET count = count + 1
+            """,
+            (user_id, day),
+        )
+
+
+def get_total_ai_usage(day: str) -> int:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(count), 0) as total FROM ai_usage WHERE day = ?",
+            (day,),
+        ).fetchone()
+        return row["total"]
+
+
+def set_goal(user_id: int, target_amount: float):
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO goals (user_id, target_amount, created_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id) DO UPDATE SET
+                target_amount = excluded.target_amount,
+                created_at = excluded.created_at
+            """,
+            (user_id, target_amount),
+        )
+
+
+def get_goal(user_id: int):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT target_amount, created_at FROM goals WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+
+
+def get_net_since(user_id: int, since: str) -> float:
+    """Ingresos menos gastos del usuario desde una fecha (para el avance de metas)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN kind = 'ingreso' THEN amount ELSE 0 END), 0) -
+                COALESCE(SUM(CASE WHEN kind = 'gasto' THEN amount ELSE 0 END), 0) as net
+            FROM transactions
+            WHERE user_id = ? AND created_at >= ?
+            """,
+            (user_id, since),
+        ).fetchone()
+        return row["net"]
+
+
+def get_all_user_ids():
+    with get_conn() as conn:
+        rows = conn.execute("SELECT user_id FROM users").fetchall()
+        return [r["user_id"] for r in rows]
+
+
+def get_user_count() -> int:
+    with get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) as n FROM users").fetchone()
+        return row["n"]
