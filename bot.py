@@ -5,13 +5,16 @@ Comandos:
   /moneda USD          - define la moneda principal del usuario
   /resumen semana      - resumen de los ultimos 7 dias
   /resumen mes         - resumen de los ultimos 30 dias
+  /categorias          - ve las categorias que se formaron segun tus registros
   /presupuesto         - ver tus limites de gasto por categoria
   /presupuesto X 200   - definir un limite mensual de 200 para la categoria X
   /exportar            - descargar todo tu historial en un archivo Excel
   /ayuda               - vuelve a mostrar las instrucciones
 
 Cualquier otro mensaje de texto se interpreta como un registro de gasto o
-ingreso, ej: "gaste 50 en el mercado" o "spent $20 on groceries".
+ingreso, ej: "gaste 50 en el mercado" o "spent $20 on groceries". Como la
+categoria la decide una IA, despues de cada registro el bot pregunta si
+la categoria esta bien; si no, deja elegir la correcta con botones.
 """
 
 import asyncio
@@ -21,7 +24,13 @@ import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BufferedInputFile, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from dotenv import load_dotenv
 
 # Debe cargarse ANTES de importar parser: ese modulo lee ANTHROPIC_API_KEY
@@ -49,16 +58,30 @@ WELCOME = (
     "/resumen semana - tus totales de los ultimos 7 dias\n"
     "/resumen mes - tus totales de los ultimos 30 dias\n"
     "/moneda USD - define tu moneda (ej. PEN, USD, MXN, EUR)\n"
+    "/categorias - ve las categorias que se formaron segun tus registros\n"
     "/presupuesto comida 200 - define un limite mensual para una categoria\n"
     "/presupuesto - ver tus limites actuales\n"
     "/exportar - descarga todo tu historial en un archivo Excel\n"
-    "/ayuda - vuelve a mostrar este mensaje"
+    "/ayuda - vuelve a mostrar este mensaje\n\n"
+    "La categoria de cada registro la decide una IA. Por eso, despues de "
+    "cada uno te voy a preguntar si esta bien esa categoria; si marcas que "
+    "no, te dejo elegir la correcta con botones."
 )
 
 VALID_CATEGORIES = [
     "comida", "transporte", "servicios", "salud",
     "entretenimiento", "trabajo/negocio", "otros",
 ]
+
+CATEGORY_LABELS = {
+    "comida": "Comida",
+    "transporte": "Transporte",
+    "servicios": "Servicios",
+    "salud": "Salud",
+    "entretenimiento": "Entretenimiento",
+    "trabajo/negocio": "Trabajo/Negocio",
+    "otros": "Otros",
+}
 
 
 @dp.message(Command("start"))
@@ -110,6 +133,39 @@ async def cmd_summary(message: Message, command: CommandObject):
     if not summary["gastos_por_categoria"] and not summary["ingresos_por_categoria"]:
         lines.append("\nTodavia no registras nada en este periodo. Escribeme algo como \"gaste 20 en almuerzo\".")
 
+    await message.answer("\n".join(lines))
+
+
+@dp.message(Command("categorias"))
+async def cmd_categories(message: Message):
+    db.ensure_user(message.from_user.id, message.from_user.username)
+    rows = db.get_categories_summary(message.from_user.id)
+    currency = db.get_currency(message.from_user.id)
+
+    if not rows:
+        await message.answer(
+            "Todavia no tienes categorias propias: se van formando segun lo "
+            "que registres. Prueba escribiendo algo como \"gaste 20 en almuerzo\"."
+        )
+        return
+
+    gastos = [r for r in rows if r["kind"] == "gasto"]
+    ingresos = [r for r in rows if r["kind"] == "ingreso"]
+
+    lines = ["Estas son tus categorias, segun como has usado el bot:"]
+    if gastos:
+        lines.append("\nGastos:")
+        for r in gastos:
+            lines.append(f"  - {r['category']}: {r['total']:.2f} {currency} ({r['n']} registros)")
+    if ingresos:
+        lines.append("\nIngresos:")
+        for r in ingresos:
+            lines.append(f"  - {r['category']}: {r['total']:.2f} {currency} ({r['n']} registros)")
+
+    lines.append(
+        "\nSi alguna vez te pregunto y marcas que una categoria no esta bien, "
+        "la corrijo y asi esta lista refleja mejor tus habitos reales."
+    )
     await message.answer("\n".join(lines))
 
 
@@ -219,17 +275,61 @@ async def handle_text(message: Message):
         return
 
     kind, amount, category = result
-    db.add_transaction(message.from_user.id, kind, amount, category, message.text)
+    tx_id = db.add_transaction(message.from_user.id, kind, amount, category, message.text)
     currency = db.get_currency(message.from_user.id)
 
     verbo = "Registre un ingreso" if kind == "ingreso" else "Registre un gasto"
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="Si, esta bien", callback_data=f"catok:{tx_id}"),
+            InlineKeyboardButton(text="No, cambiar", callback_data=f"catno:{tx_id}"),
+        ]]
+    )
     await message.answer(
         f"{verbo} de {amount:.2f} {currency} en la categoria \"{category}\". "
-        f"Usa /resumen semana para ver tus totales."
+        f"¿Esta bien esa categoria? (usa /resumen semana para ver tus totales)",
+        reply_markup=keyboard,
     )
 
     if kind == "gasto":
         await _check_budget_alert(message, message.from_user.id, category)
+
+
+@dp.callback_query(F.data.startswith("catok:"))
+async def cb_category_ok(callback: CallbackQuery):
+    if callback.message:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Gracias, anotado.")
+
+
+@dp.callback_query(F.data.startswith("catno:"))
+async def cb_category_no(callback: CallbackQuery):
+    tx_id = callback.data.split(":", 1)[1]
+    buttons = [
+        InlineKeyboardButton(text=CATEGORY_LABELS[c], callback_data=f"setcat:{tx_id}:{c}")
+        for c in VALID_CATEGORIES
+    ]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+    if callback.message:
+        await callback.message.edit_text("¿En cual categoria deberia ir?", reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("setcat:"))
+async def cb_category_set(callback: CallbackQuery):
+    _, tx_id, category = callback.data.split(":", 2)
+    db.update_transaction_category(int(tx_id), category)
+
+    if callback.message:
+        await callback.message.edit_text(f"Listo, lo cambie a la categoria \"{category}\".")
+    await callback.answer("Categoria actualizada")
+
+    if callback.message:
+        user_id = callback.from_user.id
+        budgets = {b["category"]: b["limit_amount"] for b in db.get_budgets(user_id)}
+        if category in budgets:
+            await _check_budget_alert(callback.message, user_id, category)
 
 
 async def main():

@@ -84,15 +84,43 @@ def get_currency(user_id: int) -> str:
         return row["currency"] if row else "USD"
 
 
-def add_transaction(user_id: int, kind: str, amount: float, category: str, raw_text: str):
+def add_transaction(user_id: int, kind: str, amount: float, category: str, raw_text: str) -> int:
     with get_conn() as conn:
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT INTO transactions (user_id, kind, amount, category, raw_text)
             VALUES (?, ?, ?, ?, ?)
             """,
             (user_id, kind, amount, category, raw_text),
         )
+        return cur.lastrowid
+
+
+def update_transaction_category(transaction_id: int, category: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE transactions SET category = ? WHERE id = ?",
+            (category, transaction_id),
+        )
+
+
+def get_categories_summary(user_id: int):
+    """Categorias que el usuario ha usado en la practica, con conteo y total.
+
+    Esto es lo que le mostramos como "tus categorias": no una lista fija,
+    sino la que se fue formando segun sus propios registros.
+    """
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT kind, category, COUNT(*) as n, SUM(amount) as total
+            FROM transactions
+            WHERE user_id = ?
+            GROUP BY kind, category
+            ORDER BY kind, total DESC
+            """,
+            (user_id,),
+        ).fetchall()
 
 
 def get_summary(user_id: int, period: str = "semana"):
