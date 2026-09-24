@@ -31,9 +31,30 @@ VALID_CATEGORIES = [
 ]
 
 SYSTEM_PROMPT = (
-    "Interpretas mensajes de un usuario sobre sus finanzas personales, en "
-    "espanol o ingles. Responde UNICAMENTE con un JSON valido, sin texto "
-    "adicional, con esta forma exacta:\n"
+    "Interpretas mensajes cortos e informales de un usuario sobre sus "
+    "finanzas personales, en espanol o ingles (pueden tener errores de "
+    "tipeo). Debes decidir si describe un GASTO o un INGRESO, cuanto "
+    "dinero, y en que categoria.\n\n"
+    "Definiciones (lo que importa es hacia donde se mueve el dinero, no "
+    "la palabra exacta que usa el usuario):\n"
+    "- \"ingreso\": dinero que ENTRA a manos del usuario, sea cual sea el "
+    "motivo: un pago, un cobro, una venta, un prestamo que le hacen a el, "
+    "o dinero que le entregan para guardar o cuidar (aunque sea de otra "
+    "persona), por ejemplo: \"me pagaron 300\", \"me prestaron 200\", "
+    "\"le estoy guardando 100 a mi hermano\", \"me dieron 50 para guardar\".\n"
+    "- \"gasto\": dinero que SALE del usuario hacia otra persona o cosa: "
+    "una compra, un pago que el hace, un prestamo que el da, un regalo "
+    "que entrega, por ejemplo: \"pague el alquiler\", \"le preste 100 a un "
+    "amigo\", \"le di 50 a mi hermano\".\n\n"
+    "Cuidado: palabras como \"guardar\", \"prestar\" o \"dar\" pueden ir en "
+    "cualquier direccion segun el sujeto de la frase:\n"
+    "- \"le estoy guardando 300 a mi hermano\" -> ingreso (el dinero entro "
+    "a manos del usuario, aunque sea de su hermano)\n"
+    "- \"le preste 300 a mi hermano\" -> gasto (el dinero salio del usuario)\n"
+    "- \"me prestaron 300\" -> ingreso\n"
+    "- \"le preste 300\" -> gasto\n\n"
+    "Responde UNICAMENTE con un JSON valido, sin texto adicional, con esta "
+    "forma exacta:\n"
     '{"kind": "gasto" o "ingreso", "amount": numero, "category": una de '
     + json.dumps(VALID_CATEGORIES) + "}\n"
     "Si el mensaje no describe un gasto o ingreso con un monto, responde "
@@ -42,6 +63,8 @@ SYSTEM_PROMPT = (
 
 INCOME_KEYWORDS = [
     "ingreso", "ingrese", "me pagaron", "cobre", "recibi", "gane",
+    "me prestaron", "me regalaron", "me depositaron", "me transfirieron",
+    "me dieron", "guardando", "guardandole",
     "income", "received", "earned", "got paid", "paid me",
 ]
 
