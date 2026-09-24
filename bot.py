@@ -1,60 +1,30 @@
-"""Meow (ex-Finzo): bot de Telegram para finanzas personales.
+"""Finzo: bot de Telegram para finanzas personales (MVP).
 
 Comandos:
-  /start               - registra al usuario (pide moneda si es nuevo)
-  /moneda USD          - define la moneda principal del usuario
-  /resumen semana      - resumen de los ultimos 7 dias (con grafico)
-  /resumen mes         - resumen de los ultimos 30 dias (con grafico)
-  /categorias          - ve las categorias que se formaron segun tus registros
-  /presupuesto         - ver tus limites de gasto por categoria
-  /presupuesto X 200   - definir un limite mensual de 200 para la categoria X
-  /meta 500            - definir o ver tu meta de ahorro
-  /exportar            - descargar todo tu historial en un archivo Excel
-  /deshacer            - elimina tu ultimo registro
-  /borrartodo          - elimina TODO tu historial (con confirmacion)
-  /feedback            - mandale un comentario o reporte a quien mantiene el bot
-  /idioma es|en        - elegir idioma (afecta el mensaje de bienvenida)
-  /ayuda               - vuelve a mostrar las instrucciones
+  /start            - registra al usuario y explica como usarlo
+  /moneda USD       - define la moneda principal del usuario
+  /resumen semana   - resumen de los ultimos 7 dias
+  /resumen mes      - resumen de los ultimos 30 dias
+  /ayuda            - vuelve a mostrar las instrucciones
 
 Cualquier otro mensaje de texto se interpreta como un registro de gasto o
-ingreso, ej: "gaste 50 en el mercado" o "spent $20 on groceries". Como la
-categoria la decide una IA, despues de cada registro el bot pregunta si
-esta bien; si no, deja elegir la correcta o cambiar el tipo con botones.
-
-Para controlar el costo de la IA cuando hay muchos usuarios, cada usuario
-tiene una cuota diaria de mensajes analizados con IA (AI_DAILY_LIMIT); al
-superarla, el bot sigue funcionando con un analisis por palabras clave.
+ingreso, ej: "gaste 50 en el mercado" o "spent $20 on groceries".
 """
 
 import asyncio
-import datetime as dt
-import io
 import logging
 import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
-from aiogram.types import (
-    BotCommand,
-    BufferedInputFile,
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-)
+from aiogram.types import Message
 from dotenv import load_dotenv
-
-# Debe cargarse ANTES de importar parser: ese modulo lee ANTHROPIC_API_KEY
-# apenas se importa, asi que si el .env no esta cargado todavia, no la ve.
-load_dotenv()
 
 import database as db
 from parser import parse_message
 
+load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_TELEGRAM_ID = os.getenv("ADMIN_TELEGRAM_ID")
-AI_DAILY_LIMIT = int(os.getenv("AI_DAILY_LIMIT", "50"))
-PERU_UTC_OFFSET = -5  # para el resumen semanal automatico
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("finzo")
@@ -62,167 +32,29 @@ logger = logging.getLogger("finzo")
 dp = Dispatcher()
 
 WELCOME = (
-    "🐱 Hola, soy Meow 💰 Te ayudo a llevar el control de tus gastos e ingresos "
+    "Hola, soy Finzo. Te ayudo a llevar el control de tus gastos e ingresos "
     "sin salir de Telegram.\n\n"
-    "Solo escribeme lo que gastaste o recibiste, en tus propias palabras ✍️:\n"
+    "Solo escribeme lo que gastaste o recibiste, en tus propias palabras:\n"
     "  - \"gaste 50 en el mercado\"\n"
     "  - \"me pagaron 300\"\n"
     "  - \"spent $20 on transport\"\n\n"
-    "📋 Comandos utiles:\n"
-    "/resumen semana - 📅 tus totales de los ultimos 7 dias (con grafico)\n"
-    "/resumen mes - 🗓️ tus totales de los ultimos 30 dias\n"
-    "/moneda USD - 💱 define tu moneda (ej. PEN, USD, MXN, EUR)\n"
-    "/categorias - 🏷️ ve las categorias que se formaron segun tus registros\n"
-    "/presupuesto comida 200 - 🎯 define un limite mensual para una categoria "
-    "(puede ser libre, ej. \"curso de gastronomia\")\n"
-    "/presupuesto - 📊 ver tus limites actuales\n"
-    "/meta 500 viaje a Cusco - 🐷 define tu meta de ahorro y para que es\n"
-    "/exportar - 📥 descarga todo tu historial en un archivo Excel\n"
-    "/deshacer - ↩️ elimina tu ultimo registro si te equivocaste\n"
-    "/borrartodo - 🗑️ elimina TODO tu historial (con confirmacion)\n"
-    "/feedback - 💬 mandame un comentario o reporte un problema\n"
-    "/idioma en - 🌐 cambia el idioma (es/en)\n"
-    "/ayuda - ❓ vuelve a mostrar este mensaje\n\n"
-    "🤖 La categoria de cada registro la decide una IA. Por eso, despues de "
-    "cada uno te voy a preguntar si esta bien; si marcas que no, te dejo "
-    "elegir la categoria correcta o cambiar el tipo (gasto/ingreso) con "
-    "botones 👇."
+    "Comandos utiles:\n"
+    "/resumen semana - tus totales de los ultimos 7 dias\n"
+    "/resumen mes - tus totales de los ultimos 30 dias\n"
+    "/moneda USD - define tu moneda (ej. PEN, USD, MXN, EUR)\n"
+    "/ayuda - vuelve a mostrar este mensaje"
 )
-
-WELCOME_EN = (
-    "🐱 Hi, I'm Meow 💰 I help you keep track of your expenses and income "
-    "right inside Telegram.\n\n"
-    "Just tell me what you spent or received, in your own words ✍️:\n"
-    "  - \"spent 50 on groceries\"\n"
-    "  - \"got paid 300\"\n"
-    "  - \"gaste 20 en el almuerzo\"\n\n"
-    "📋 Useful commands:\n"
-    "/resumen semana - 📅 your totals for the last 7 days (with a chart)\n"
-    "/resumen mes - 🗓️ your totals for the last 30 days\n"
-    "/moneda USD - 💱 set your currency (e.g. PEN, USD, MXN, EUR)\n"
-    "/categorias - 🏷️ see the categories that formed from your own habits\n"
-    "/presupuesto comida 200 - 🎯 set a monthly limit for a category (can be "
-    "a free label, e.g. \"cooking course\")\n"
-    "/presupuesto - 📊 view your current limits\n"
-    "/meta 500 trip to Cusco - 🐷 set your savings goal and what it's for\n"
-    "/exportar - 📥 download your full history as an Excel file\n"
-    "/deshacer - ↩️ undo your last entry if you made a mistake\n"
-    "/borrartodo - 🗑️ delete ALL your data (asks to confirm)\n"
-    "/feedback - 💬 send a comment or report a problem\n"
-    "/idioma es - 🌐 switch language (es/en)\n"
-    "/ayuda - ❓ show this message again\n\n"
-    "🤖 The category for each entry is chosen by AI. That's why, after each "
-    "one, I'll ask if it looks right; if not, I'll let you pick the correct "
-    "category or flip the type (expense/income) with buttons 👇.\n\n"
-    "(Note: some replies, like /resumen or /presupuesto, are still in "
-    "Spanish for now — full English support is on the way.)"
-)
-
-BOT_COMMANDS = [
-    BotCommand(command="start", description="Registrarte y ver la intro"),
-    BotCommand(command="resumen", description="Resumen semana o mes"),
-    BotCommand(command="moneda", description="Definir tu moneda"),
-    BotCommand(command="categorias", description="Ver tus categorias segun tus habitos"),
-    BotCommand(command="presupuesto", description="Ver o definir limites mensuales"),
-    BotCommand(command="meta", description="Definir o ver tu meta de ahorro"),
-    BotCommand(command="exportar", description="Descargar tu historial en Excel"),
-    BotCommand(command="deshacer", description="Eliminar tu ultimo registro"),
-    BotCommand(command="borrartodo", description="Eliminar TODO tu historial"),
-    BotCommand(command="feedback", description="Enviar un comentario o reportar un problema"),
-    BotCommand(command="idioma", description="Cambiar idioma (es/en)"),
-    BotCommand(command="ayuda", description="Ver los comandos disponibles"),
-]
-
-VALID_CATEGORIES = [
-    "comida", "transporte", "servicios", "salud",
-    "entretenimiento", "trabajo/negocio", "otros",
-]
-
-CATEGORY_LABELS = {
-    "comida": "Comida",
-    "transporte": "Transporte",
-    "servicios": "Servicios",
-    "salud": "Salud",
-    "entretenimiento": "Entretenimiento",
-    "trabajo/negocio": "Trabajo/Negocio",
-    "otros": "Otros",
-}
-
-# Paleta categorica validada (dataviz skill) para el grafico de /resumen.
-CATEGORY_COLORS = {
-    "comida": "#2a78d6",
-    "transporte": "#eb6834",
-    "servicios": "#1baf7a",
-    "salud": "#eda100",
-    "entretenimiento": "#e87ba4",
-    "trabajo/negocio": "#008300",
-    "otros": "#4a3aa7",
-}
-
-CURRENCY_OPTIONS = ["PEN", "USD", "MXN", "EUR", "COP", "ARS"]
-
-# user_id -> tx_id: cuando el usuario eligio "Otra categoria" y le toca
-# escribir el nombre en su proximo mensaje (en vez de que se interprete
-# como un nuevo registro de gasto/ingreso).
-PENDING_CUSTOM_CATEGORY: dict[int, int] = {}
 
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    is_new = not db.user_exists(message.from_user.id)
     db.ensure_user(message.from_user.id, message.from_user.username)
-
-    if is_new:
-        buttons = [
-            InlineKeyboardButton(text=c, callback_data=f"setcur:{c}")
-            for c in CURRENCY_OPTIONS
-        ]
-        rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
-        keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
-        await message.answer(
-            "🐱 ¡Bienvenido/a a Meow! Antes de empezar, ¿en que moneda "
-            "quieres registrar tus finanzas?",
-            reply_markup=keyboard,
-        )
-        return
-
-    lang = db.get_language(message.from_user.id)
-    await message.answer(WELCOME_EN if lang == "en" else WELCOME)
-
-
-@dp.callback_query(F.data.startswith("setcur:"))
-async def cb_set_currency(callback: CallbackQuery):
-    currency = callback.data.split(":", 1)[1]
-    db.set_currency(callback.from_user.id, currency)
-    lang = db.get_language(callback.from_user.id)
-    if callback.message:
-        await callback.message.edit_text(f"Listo, tu moneda es {currency}. 🎉")
-        await callback.message.answer(WELCOME_EN if lang == "en" else WELCOME)
-    await callback.answer()
+    await message.answer(WELCOME)
 
 
 @dp.message(Command("ayuda"))
 async def cmd_help(message: Message):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    lang = db.get_language(message.from_user.id)
-    await message.answer(WELCOME_EN if lang == "en" else WELCOME)
-
-
-@dp.message(Command("idioma"))
-async def cmd_language(message: Message, command: CommandObject):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    choice = (command.args or "").strip().lower()
-    if choice not in ("es", "en"):
-        await message.answer(
-            "Usa /idioma es o /idioma en para elegir el idioma.\n"
-            "Use /idioma en or /idioma es to choose the language."
-        )
-        return
-    db.set_language(message.from_user.id, choice)
-    if choice == "en":
-        await message.answer("Got it, I'll show your intro in English from now on.")
-    else:
-        await message.answer("Listo, te muestro la intro en español de ahora en adelante.")
+    await message.answer(WELCOME)
 
 
 @dp.message(Command("moneda"))
@@ -237,51 +69,6 @@ async def cmd_currency(message: Message, command: CommandObject):
     currency = command.args.strip().split()[0]
     db.set_currency(message.from_user.id, currency)
     await message.answer(f"Listo, tu moneda ahora es {currency.upper()}.")
-
-
-def _build_category_chart(rows, currency: str):
-    """Grafico de barras horizontales de gastos por categoria. Devuelve un
-    BytesIO con un PNG, o None si no hay datos."""
-    if not rows:
-        return None
-
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    ordered = sorted(rows, key=lambda r: r["total"], reverse=True)
-    categories = [r["category"] for r in ordered]
-    totals = [r["total"] for r in ordered]
-    colors = [CATEGORY_COLORS.get(c, "#898781") for c in categories]
-
-    fig, ax = plt.subplots(figsize=(6, 0.6 * len(categories) + 1), dpi=150)
-    fig.patch.set_facecolor("#fcfcfb")
-    ax.set_facecolor("#fcfcfb")
-    bars = ax.barh(categories, totals, color=colors, height=0.6)
-    ax.invert_yaxis()
-    ax.set_xlabel(f"Gasto ({currency})", color="#52514e", fontsize=9)
-    ax.tick_params(colors="#52514e", labelsize=9)
-    for spine in ("top", "right", "left"):
-        ax.spines[spine].set_visible(False)
-    ax.spines["bottom"].set_color("#c3c2b7")
-    ax.grid(axis="x", color="#e1e0d9", linewidth=0.8)
-    ax.set_axisbelow(True)
-
-    max_total = max(totals) if totals else 0
-    for bar, total in zip(bars, totals):
-        ax.text(
-            bar.get_width() + max_total * 0.01,
-            bar.get_y() + bar.get_height() / 2,
-            f"{total:.0f}",
-            va="center", ha="left", fontsize=8, color="#0b0b0b",
-        )
-
-    fig.tight_layout()
-    buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", facecolor=fig.get_facecolor())
-    plt.close(fig)
-    buffer.seek(0)
-    return buffer
 
 
 @dp.message(Command("resumen"))
@@ -310,325 +97,11 @@ async def cmd_summary(message: Message, command: CommandObject):
 
     await message.answer("\n".join(lines))
 
-    try:
-        chart_buffer = _build_category_chart(summary["gastos_por_categoria"], currency)
-        if chart_buffer:
-            photo = BufferedInputFile(chart_buffer.read(), filename="resumen.png")
-            await message.answer_photo(photo, caption="📊 Gastos por categoria")
-    except Exception as exc:
-        logger.warning("No se pudo generar el grafico de resumen: %s", exc)
-
-
-@dp.message(Command("categorias"))
-async def cmd_categories(message: Message):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    rows = db.get_categories_summary(message.from_user.id)
-    currency = db.get_currency(message.from_user.id)
-
-    if not rows:
-        await message.answer(
-            "Todavia no tienes categorias propias: se van formando segun lo "
-            "que registres. Prueba escribiendo algo como \"gaste 20 en almuerzo\"."
-        )
-        return
-
-    gastos = [r for r in rows if r["kind"] == "gasto"]
-    ingresos = [r for r in rows if r["kind"] == "ingreso"]
-
-    lines = ["Estas son tus categorias, segun como has usado el bot:"]
-    if gastos:
-        lines.append("\nGastos:")
-        for r in gastos:
-            lines.append(f"  - {r['category']}: {r['total']:.2f} {currency} ({r['n']} registros)")
-    if ingresos:
-        lines.append("\nIngresos:")
-        for r in ingresos:
-            lines.append(f"  - {r['category']}: {r['total']:.2f} {currency} ({r['n']} registros)")
-
-    lines.append(
-        "\nSi alguna vez te pregunto y marcas que una categoria no esta bien, "
-        "la corrijo y asi esta lista refleja mejor tus habitos reales."
-    )
-    await message.answer("\n".join(lines))
-
-
-@dp.message(Command("presupuesto"))
-async def cmd_budget(message: Message, command: CommandObject):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    currency = db.get_currency(message.from_user.id)
-
-    if not command.args:
-        budgets = db.get_budgets(message.from_user.id)
-        if not budgets:
-            await message.answer(
-                "No tienes presupuestos definidos todavia. Usa algo como "
-                "\"/presupuesto comida 200\" para poner un limite mensual."
-            )
-            return
-        lines = [f"Tus presupuestos mensuales ({currency}):"]
-        for row in budgets:
-            spent = db.get_month_spent(message.from_user.id, row["category"])
-            lines.append(f"  - {row['category']}: {spent:.2f} / {row['limit_amount']:.2f}")
-        await message.answer("\n".join(lines))
-        return
-
-    parts = command.args.strip().rsplit(" ", 1)
-    if len(parts) != 2:
-        await message.answer(
-            "Formato: /presupuesto categoria monto (ej. \"/presupuesto comida 200\" o "
-            "\"/presupuesto curso de gastronomia 8000\")."
-        )
-        return
-
-    category, raw_amount = parts[0].strip().lower(), parts[1].strip()
-    if not category:
-        await message.answer("Falta el nombre de la categoria. Ejemplo: \"/presupuesto comida 200\".")
-        return
-    try:
-        limit_amount = float(raw_amount.replace(",", "."))
-    except ValueError:
-        await message.answer("El monto no es valido. Ejemplo: \"/presupuesto comida 200\".")
-        return
-
-    db.set_budget(message.from_user.id, category, limit_amount)
-    note = ""
-    if category not in VALID_CATEGORIES:
-        note = (
-            "\n\nComo \"{}\" no es una de las categorias que uso para clasificar tus "
-            "gastos automaticamente, este limite solo va a sumar los gastos que tu "
-            "asignes manualmente a esa categoria (con el boton \"Otra categoria\" "
-            "cuando registres uno)."
-        ).format(category)
-    await message.answer(
-        f"Listo, tu limite mensual para \"{category}\" es {limit_amount:.2f} {currency}.{note}"
-    )
-
-
-@dp.message(Command("meta"))
-async def cmd_goal(message: Message, command: CommandObject):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    currency = db.get_currency(message.from_user.id)
-
-    if not command.args:
-        goal = db.get_goal(message.from_user.id)
-        if not goal:
-            await message.answer(
-                "No tienes una meta de ahorro todavia. Usa \"/meta 500 viaje a "
-                "Cusco\" para definir cuanto quieres ahorrar y para que "
-                "(la descripcion es opcional)."
-            )
-            return
-        net = db.get_net_since(message.from_user.id, goal["created_at"])
-        target = goal["target_amount"]
-        label = goal["label"]
-        pct = (net / target * 100) if target else 0
-        pct = max(0, pct)
-        para = f" para \"{label}\"" if label else ""
-        await message.answer(
-            f"🐷 Tu meta{para} es ahorrar {target:.2f} {currency}.\n"
-            f"Llevas ahorrado {net:.2f} {currency} ({pct:.0f}%) desde que la "
-            f"definiste.\nUsa \"/meta {target:.0f}{' ' + label if label else ''}\" "
-            f"de nuevo para reiniciarla."
-        )
-        return
-
-    parts = command.args.strip().split(maxsplit=1)
-    try:
-        target_amount = float(parts[0].replace(",", "."))
-    except ValueError:
-        await message.answer(
-            "Formato: /meta 500 viaje a Cusco (la descripcion despues del "
-            "monto es opcional)."
-        )
-        return
-
-    if target_amount <= 0:
-        await message.answer("El monto debe ser mayor que cero.")
-        return
-
-    label = parts[1].strip() if len(parts) > 1 else None
-    db.set_goal(message.from_user.id, target_amount, label)
-    para = f" para \"{label}\"" if label else ""
-    await message.answer(
-        f"🐷 Meta guardada: ahorrar {target_amount:.2f} {currency}{para}. Te "
-        f"ire mostrando tu avance con /meta."
-    )
-
-
-@dp.message(Command("exportar"))
-async def cmd_export(message: Message):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    rows = db.get_all_transactions(message.from_user.id)
-
-    if not rows:
-        await message.answer("Todavia no tienes movimientos registrados para exportar.")
-        return
-
-    from openpyxl import Workbook
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Finzo"
-    ws.append(["Fecha", "Tipo", "Monto", "Categoria", "Detalle"])
-    for row in rows:
-        ws.append([row["created_at"], row["kind"], row["amount"], row["category"], row["raw_text"]])
-
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-
-    file = BufferedInputFile(buffer.read(), filename="finzo_historial.xlsx")
-    await message.answer_document(file, caption="Aqui tienes todo tu historial en Excel.")
-
-
-@dp.message(Command("deshacer"))
-async def cmd_undo(message: Message):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    row = db.delete_last_transaction(message.from_user.id)
-    if not row:
-        await message.answer("No tienes registros para deshacer.")
-        return
-    currency = db.get_currency(message.from_user.id)
-    await message.answer(
-        f"↩️ Listo, elimine tu ultimo registro: {row['kind']} de "
-        f"{row['amount']:.2f} {currency} en \"{row['category']}\"."
-    )
-
-
-@dp.message(Command("borrartodo"))
-async def cmd_delete_all(message: Message):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(text="⚠️ Si, borrar todo", callback_data="delall:confirm"),
-            InlineKeyboardButton(text="Cancelar", callback_data="delall:cancel"),
-        ]]
-    )
-    await message.answer(
-        "⚠️ Esto va a borrar TODOS tus registros, presupuestos y tu meta de "
-        "ahorro. No se puede deshacer. Tu moneda e idioma se mantienen.\n\n"
-        "¿Seguro que quieres continuar?",
-        reply_markup=keyboard,
-    )
-
-
-@dp.callback_query(F.data == "delall:confirm")
-async def cb_delete_all_confirm(callback: CallbackQuery):
-    db.delete_all_user_data(callback.from_user.id)
-    if callback.message:
-        await callback.message.edit_text(
-            "🗑️ Listo, borre todos tus registros, presupuestos y tu meta de ahorro."
-        )
-    await callback.answer("Datos borrados")
-
-
-@dp.callback_query(F.data == "delall:cancel")
-async def cb_delete_all_cancel(callback: CallbackQuery):
-    if callback.message:
-        await callback.message.edit_text("Cancelado, no borre nada.")
-    await callback.answer()
-
-
-@dp.message(Command("feedback"))
-async def cmd_feedback(message: Message, command: CommandObject):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    if not command.args:
-        await message.answer(
-            "Cuentame que esta pasando o que te gustaria que mejore. Ejemplo:\n"
-            "/feedback la categoria de \"internet\" deberia ser servicios, no otros"
-        )
-        return
-
-    text = command.args.strip()
-    if ADMIN_TELEGRAM_ID:
-        who = f"@{message.from_user.username}" if message.from_user.username else f"id {message.from_user.id}"
-        try:
-            await message.bot.send_message(
-                ADMIN_TELEGRAM_ID,
-                f"💬 Feedback de {who}:\n{text}",
-            )
-        except Exception as exc:
-            logger.warning("No se pudo reenviar el feedback al admin: %s", exc)
-
-    await message.answer("Gracias, se lo hice llegar a quien mantiene el bot. 🙌")
-
-
-@dp.message(Command("admin"))
-async def cmd_admin(message: Message):
-    if not ADMIN_TELEGRAM_ID or str(message.from_user.id) != str(ADMIN_TELEGRAM_ID):
-        return  # comando oculto: no revela nada a quien no sea el admin
-    today = dt.datetime.utcnow().date().isoformat()
-    total_users = db.get_user_count()
-    ai_today = db.get_total_ai_usage(today)
-    await message.answer(
-        "📊 Estado de Meow:\n"
-        f"Usuarios registrados: {total_users}\n"
-        f"Mensajes procesados con IA hoy: {ai_today}\n"
-        f"Limite diario de IA por usuario: {AI_DAILY_LIMIT}"
-    )
-
-
-async def _check_budget_alert(message: Message, user_id: int, category: str):
-    budgets = {b["category"]: b["limit_amount"] for b in db.get_budgets(user_id)}
-    limit_amount = budgets.get(category)
-    if limit_amount is None:
-        return
-
-    spent = db.get_month_spent(user_id, category)
-    currency = db.get_currency(user_id)
-    ratio = spent / limit_amount if limit_amount > 0 else 0
-
-    if spent > limit_amount:
-        await message.answer(
-            f"Ojo: superaste tu presupuesto mensual de \"{category}\" "
-            f"({spent:.2f} / {limit_amount:.2f} {currency})."
-        )
-    elif ratio >= 0.8:
-        await message.answer(
-            f"Aviso: ya usaste el {ratio * 100:.0f}% de tu presupuesto mensual de "
-            f"\"{category}\" ({spent:.2f} / {limit_amount:.2f} {currency})."
-        )
-
-
-def _confirm_keyboard(tx_id: int, kind: str) -> InlineKeyboardMarkup:
-    flip_label = "↔️ Era un ingreso" if kind == "gasto" else "↔️ Era un gasto"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Si, esta bien", callback_data=f"catok:{tx_id}"),
-                InlineKeyboardButton(text="🔄 Cambiar categoria", callback_data=f"catno:{tx_id}"),
-            ],
-            [InlineKeyboardButton(text=flip_label, callback_data=f"flipkind:{tx_id}")],
-        ]
-    )
-
 
 @dp.message(F.text)
 async def handle_text(message: Message):
     db.ensure_user(message.from_user.id, message.from_user.username)
-    user_id = message.from_user.id
-
-    pending_tx_id = PENDING_CUSTOM_CATEGORY.pop(user_id, None)
-    if pending_tx_id is not None:
-        category = message.text.strip().lower()
-        if not category:
-            await message.answer("Ese nombre no es valido, intenta de nuevo.")
-            PENDING_CUSTOM_CATEGORY[user_id] = pending_tx_id
-            return
-        db.update_transaction_category(pending_tx_id, category)
-        await message.answer(f"Listo, lo cambie a la categoria \"{category}\".")
-        budgets = {b["category"]: b["limit_amount"] for b in db.get_budgets(user_id)}
-        if category in budgets:
-            await _check_budget_alert(message, user_id, category)
-        return
-
-    today = dt.datetime.utcnow().date().isoformat()
-
-    usage_before = db.get_ai_usage_count(user_id, today)
-    allow_ai = usage_before < AI_DAILY_LIMIT
-    result, used_ai = parse_message(message.text, allow_ai=allow_ai)
-    if used_ai:
-        db.increment_ai_usage(user_id, today)
+    result = parse_message(message.text)
 
     if result is None:
         await message.answer(
@@ -638,136 +111,14 @@ async def handle_text(message: Message):
         return
 
     kind, amount, category = result
-    tx_id = db.add_transaction(user_id, kind, amount, category, message.text)
-    currency = db.get_currency(user_id)
+    db.add_transaction(message.from_user.id, kind, amount, category, message.text)
+    currency = db.get_currency(message.from_user.id)
 
     verbo = "Registre un ingreso" if kind == "ingreso" else "Registre un gasto"
     await message.answer(
         f"{verbo} de {amount:.2f} {currency} en la categoria \"{category}\". "
-        f"¿Esta bien? (usa /resumen semana para ver tus totales)",
-        reply_markup=_confirm_keyboard(tx_id, kind),
+        f"Usa /resumen semana para ver tus totales."
     )
-
-    if not allow_ai and usage_before == AI_DAILY_LIMIT:
-        await message.answer(
-            f"ℹ️ Hoy ya usaste tus {AI_DAILY_LIMIT} registros analizados con IA, "
-            "asi que por ahora sigo funcionando con un analisis mas simple "
-            "por palabras clave (un poco menos preciso). Manana vuelve a "
-            "tener el cupo completo."
-        )
-
-    if kind == "gasto":
-        await _check_budget_alert(message, user_id, category)
-
-
-@dp.callback_query(F.data.startswith("catok:"))
-async def cb_category_ok(callback: CallbackQuery):
-    if callback.message:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.answer("Gracias, anotado.")
-
-
-@dp.callback_query(F.data.startswith("catno:"))
-async def cb_category_no(callback: CallbackQuery):
-    tx_id = callback.data.split(":", 1)[1]
-    buttons = [
-        InlineKeyboardButton(text=CATEGORY_LABELS[c], callback_data=f"setcat:{tx_id}:{c}")
-        for c in VALID_CATEGORIES
-    ]
-    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
-    rows.append([InlineKeyboardButton(text="✏️ Otra categoria", callback_data=f"catother:{tx_id}")])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
-    if callback.message:
-        await callback.message.edit_text("¿En cual categoria deberia ir?", reply_markup=keyboard)
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("catother:"))
-async def cb_category_other(callback: CallbackQuery):
-    tx_id = int(callback.data.split(":", 1)[1])
-    PENDING_CUSTOM_CATEGORY[callback.from_user.id] = tx_id
-    if callback.message:
-        await callback.message.edit_text(
-            "Escribeme el nombre de la categoria que quieres usar (ej. "
-            "\"curso de gastronomia\")."
-        )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("setcat:"))
-async def cb_category_set(callback: CallbackQuery):
-    _, tx_id, category = callback.data.split(":", 2)
-    db.update_transaction_category(int(tx_id), category)
-
-    if callback.message:
-        await callback.message.edit_text(f"Listo, lo cambie a la categoria \"{category}\".")
-    await callback.answer("Categoria actualizada")
-
-    if callback.message:
-        user_id = callback.from_user.id
-        budgets = {b["category"]: b["limit_amount"] for b in db.get_budgets(user_id)}
-        if category in budgets:
-            await _check_budget_alert(callback.message, user_id, category)
-
-
-@dp.callback_query(F.data.startswith("flipkind:"))
-async def cb_flip_kind(callback: CallbackQuery):
-    tx_id = int(callback.data.split(":", 1)[1])
-    tx = db.get_transaction(tx_id)
-    if tx is None:
-        await callback.answer("Ese registro ya no existe.")
-        return
-
-    new_kind = "ingreso" if tx["kind"] == "gasto" else "gasto"
-    db.update_transaction_kind(tx_id, new_kind)
-
-    if callback.message:
-        etiqueta = "ingreso" if new_kind == "ingreso" else "gasto"
-        await callback.message.edit_text(
-            f"Listo, lo cambie a {etiqueta} de {tx['amount']:.2f} en \"{tx['category']}\"."
-        )
-    await callback.answer("Tipo actualizado")
-
-    if callback.message and new_kind == "gasto":
-        await _check_budget_alert(callback.message, callback.from_user.id, tx["category"])
-
-
-def _seconds_until_next_weekly_report() -> float:
-    """Domingos 8pm hora de Peru (UTC-5), para el resumen semanal automatico."""
-    now_utc = dt.datetime.utcnow()
-    peru_now = now_utc + dt.timedelta(hours=PERU_UTC_OFFSET)
-    days_ahead = (6 - peru_now.weekday()) % 7  # lunes=0 ... domingo=6
-    target_peru = peru_now.replace(hour=20, minute=0, second=0, microsecond=0) + dt.timedelta(days=days_ahead)
-    if target_peru <= peru_now:
-        target_peru += dt.timedelta(days=7)
-    target_utc = target_peru - dt.timedelta(hours=PERU_UTC_OFFSET)
-    return max((target_utc - now_utc).total_seconds(), 60)
-
-
-async def weekly_summary_task(bot: Bot):
-    """Manda, sin que lo pidan, un resumen semanal a cada usuario activo."""
-    while True:
-        try:
-            await asyncio.sleep(_seconds_until_next_weekly_report())
-            for user_id in db.get_all_user_ids():
-                try:
-                    summary = db.get_summary(user_id, "semana")
-                    if summary["total_ingresos"] == 0 and summary["total_gastos"] == 0:
-                        continue
-                    currency = db.get_currency(user_id)
-                    lines = [
-                        "📅 Tu resumen semanal:",
-                        f"Ingresos: {summary['total_ingresos']:.2f} {currency}",
-                        f"Gastos: {summary['total_gastos']:.2f} {currency}",
-                        f"Balance: {summary['balance']:.2f} {currency}",
-                        "\nEscribe /resumen semana para ver el detalle por categoria.",
-                    ]
-                    await bot.send_message(user_id, "\n".join(lines))
-                except Exception as exc:
-                    logger.warning("No se pudo enviar resumen semanal a %s: %s", user_id, exc)
-        except Exception as exc:
-            logger.warning("Fallo el ciclo de resumen semanal, reintento en 1 hora: %s", exc)
-            await asyncio.sleep(3600)
 
 
 async def main():
@@ -776,8 +127,6 @@ async def main():
 
     db.init_db()
     bot = Bot(token=BOT_TOKEN)
-    await bot.set_my_commands(BOT_COMMANDS)
-    asyncio.create_task(weekly_summary_task(bot))
     logger.info("Finzo esta corriendo...")
     await dp.start_polling(bot)
 
