@@ -108,6 +108,16 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS goal_contributions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         # Migraciones suaves: agregan columnas nuevas si la base de datos
         # viene de una version anterior que no las tenia.
         for statement in (
@@ -371,6 +381,38 @@ def get_goal(user_id: int):
         ).fetchone()
 
 
+# --- Aportes a la meta de ahorro --------------------------------------
+#
+# El avance de la meta se mide por aportes que el usuario registra a
+# proposito (con /aportar), no por el balance general de ingresos y
+# gastos: ese balance mezcla gastos necesarios (alquiler, mercaderia,
+# etc.) con el ahorro real, lo que hacia que la meta subiera o bajara
+# por movimientos que no tenian nada que ver con ella.
+
+def add_goal_contribution(user_id: int, amount: float) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO goal_contributions (user_id, amount) VALUES (?, ?)",
+            (user_id, amount),
+        )
+        return cur.lastrowid
+
+
+def get_goal_contributions_sum(user_id: int, since: str) -> float:
+    """Total aportado desde una fecha (normalmente desde que se definio
+    la meta actual, para que un aporte de una meta anterior no cuente)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) as total
+            FROM goal_contributions
+            WHERE user_id = ? AND created_at >= ?
+            """,
+            (user_id, since),
+        ).fetchone()
+        return row["total"]
+
+
 def get_net_since(user_id: int, since: str) -> float:
     """Ingresos menos gastos del usuario desde una fecha (para el avance de metas)."""
     with get_conn() as conn:
@@ -406,6 +448,7 @@ def delete_all_user_data(user_id: int):
         conn.execute("DELETE FROM transactions WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM budgets WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM goals WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM goal_contributions WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM ai_usage WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM achievements WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM challenges WHERE user_id = ?", (user_id,))

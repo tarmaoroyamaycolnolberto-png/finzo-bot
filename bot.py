@@ -9,6 +9,7 @@ Comandos:
   /presupuesto         - ver tus limites de gasto por categoria
   /presupuesto X 200   - definir un limite mensual de 200 para la categoria X
   /meta 500            - definir o ver tu meta de ahorro
+  /aportar 50          - sumar un aporte hacia tu meta de ahorro
   /exportar            - descargar todo tu historial en un archivo Excel
   /deshacer            - elimina tu ultimo registro
   /borrartodo          - elimina TODO tu historial (con confirmacion)
@@ -81,6 +82,7 @@ WELCOME = (
     "(puede ser libre, ej. \"curso de gastronomia\")\n"
     "/presupuesto - 📊 ver tus limites actuales\n"
     "/meta 500 viaje a Cusco - 🐷 define tu meta de ahorro y para que es\n"
+    "/aportar 50 - 💰 suma un aporte a tu meta de ahorro\n"
     "/exportar - 📥 descarga todo tu historial en un archivo Excel\n"
     "/deshacer - ↩️ elimina tu ultimo registro si te equivocaste\n"
     "/borrartodo - 🗑️ elimina TODO tu historial (con confirmacion)\n"
@@ -112,6 +114,7 @@ WELCOME_EN = (
     "a free label, e.g. \"cooking course\")\n"
     "/presupuesto - 📊 view your current limits\n"
     "/meta 500 trip to Cusco - 🐷 set your savings goal and what it's for\n"
+    "/aportar 50 - 💰 log a contribution toward your savings goal\n"
     "/exportar - 📥 download your full history as an Excel file\n"
     "/deshacer - ↩️ undo your last entry if you made a mistake\n"
     "/borrartodo - 🗑️ delete ALL your data (asks to confirm)\n"
@@ -135,6 +138,7 @@ BOT_COMMANDS = [
     BotCommand(command="categorias", description="Ver tus categorias segun tus habitos"),
     BotCommand(command="presupuesto", description="Ver o definir limites mensuales"),
     BotCommand(command="meta", description="Definir o ver tu meta de ahorro"),
+    BotCommand(command="aportar", description="Sumar un aporte a tu meta de ahorro"),
     BotCommand(command="exportar", description="Descargar tu historial en Excel"),
     BotCommand(command="deshacer", description="Eliminar tu ultimo registro"),
     BotCommand(command="borrartodo", description="Eliminar TODO tu historial"),
@@ -184,7 +188,7 @@ ACHIEVEMENTS = {
     "primer_registro": ("🥇", "Primer paso", "Registraste tu primer movimiento."),
     "diez_registros": ("🔟", "Constancia", "Ya llevas 10 movimientos registrados."),
     "cincuenta_registros": ("💯", "Veterano/a", "Llevas 50 movimientos registrados."),
-    "primer_balance_positivo": ("🌱", "En verde", "Tu balance desde que pusiste tu meta es positivo."),
+    "primer_aporte": ("🌱", "Primer aporte", "Hiciste tu primer aporte hacia tu meta de ahorro."),
     "meta_cumplida": ("🏆", "¡Meta cumplida!", "Llegaste al 100% de tu meta de ahorro."),
     "presupuesto_bajo_control": ("🛡️", "Bajo control", "Ninguno de tus presupuestos esta pasado de su limite."),
     "reto_superado": ("🔥", "Reto superado", "Cumpliste un reto de ahorro de principio a fin."),
@@ -446,17 +450,18 @@ async def cmd_goal(message: Message, command: CommandObject):
                 "(la descripcion es opcional)."
             )
             return
-        net = db.get_net_since(message.from_user.id, goal["created_at"])
+        aportado = db.get_goal_contributions_sum(message.from_user.id, goal["created_at"])
         target = goal["target_amount"]
         label = goal["label"]
-        pct = (net / target * 100) if target else 0
-        pct = max(0, pct)
+        pct = (aportado / target * 100) if target else 0
+        pct = max(0, min(100, pct))
         para = f" para \"{label}\"" if label else ""
         await message.answer(
             f"🐷 Tu meta{para} es ahorrar {target:.2f} {currency}.\n"
-            f"Llevas ahorrado {net:.2f} {currency} ({pct:.0f}%) desde que la "
-            f"definiste.\nUsa \"/meta {target:.0f}{' ' + label if label else ''}\" "
-            f"de nuevo para reiniciarla."
+            f"Llevas aportado {aportado:.2f} {currency} ({pct:.0f}%). Usa "
+            f"\"/aportar 50\" para sumar a tu meta cuando apartes algo.\n"
+            f"Usa \"/meta {target:.0f}{' ' + label if label else ''}\" de nuevo "
+            f"para reiniciarla."
         )
         return
 
@@ -478,9 +483,50 @@ async def cmd_goal(message: Message, command: CommandObject):
     db.set_goal(message.from_user.id, target_amount, label)
     para = f" para \"{label}\"" if label else ""
     await message.answer(
-        f"🐷 Meta guardada: ahorrar {target_amount:.2f} {currency}{para}. Te "
-        f"ire mostrando tu avance con /meta."
+        f"🐷 Meta guardada: ahorrar {target_amount:.2f} {currency}{para}. Usa "
+        f"\"/aportar 50\" cada vez que apartes algo, y te ire mostrando tu "
+        f"avance con /meta."
     )
+
+
+@dp.message(Command("aportar"))
+async def cmd_contribute(message: Message, command: CommandObject):
+    db.ensure_user(message.from_user.id, message.from_user.username)
+    currency = db.get_currency(message.from_user.id)
+    goal = db.get_goal(message.from_user.id)
+
+    if not goal:
+        await message.answer(
+            "Todavia no tienes una meta de ahorro. Usa \"/meta 500 viaje a "
+            "Cusco\" para crear una primero."
+        )
+        return
+
+    if not command.args:
+        await message.answer("¿Cuanto quieres aportar? Ejemplo: /aportar 50")
+        return
+
+    try:
+        amount = float(command.args.strip().split()[0].replace(",", "."))
+    except ValueError:
+        await message.answer("Monto invalido. Ejemplo: /aportar 50")
+        return
+
+    if amount <= 0:
+        await message.answer("El monto debe ser mayor que cero.")
+        return
+
+    db.add_goal_contribution(message.from_user.id, amount)
+    aportado = db.get_goal_contributions_sum(message.from_user.id, goal["created_at"])
+    target = goal["target_amount"]
+    label = goal["label"]
+    pct = max(0, min(100, (aportado / target * 100) if target else 0))
+    para = f" para \"{label}\"" if label else ""
+    await message.answer(
+        f"💰 Aporte registrado: {amount:.2f} {currency}.\n"
+        f"Llevas {aportado:.2f} / {target:.2f} {currency} ({pct:.0f}%){para}."
+    )
+    await _check_goal_achievements(message, message.from_user.id)
 
 
 @dp.message(Command("exportar"))
@@ -619,10 +665,10 @@ async def _check_goal_achievements(message: Message, user_id: int):
     goal = db.get_goal(user_id)
     if not goal:
         return
-    net = db.get_net_since(user_id, goal["created_at"])
-    if net > 0:
-        await _award(message, user_id, "primer_balance_positivo")
-    if goal["target_amount"] and net >= goal["target_amount"]:
+    aportado = db.get_goal_contributions_sum(user_id, goal["created_at"])
+    if aportado > 0:
+        await _award(message, user_id, "primer_aporte")
+    if goal["target_amount"] and aportado >= goal["target_amount"]:
         await _award(message, user_id, "meta_cumplida")
 
 
@@ -884,7 +930,6 @@ async def handle_text(message: Message):
         db.adjust_pet_mood(user_id, 3)
 
     await _check_registro_achievements(message, user_id)
-    await _check_goal_achievements(message, user_id)
 
 
 @dp.callback_query(F.data.startswith("catok:"))
