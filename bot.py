@@ -9,8 +9,8 @@ Comandos:
   /categorias          - ve las categorias que se formaron segun tus registros
   /presupuesto         - ver tus limites de gasto por categoria
   /presupuesto X 200   - definir un limite mensual de 200 para la categoria X
-  /meta 500            - definir o ver tu meta de ahorro
-  /aportar 50          - sumar un aporte hacia tu meta de ahorro
+  /meta                - menu para crear tu meta de ahorro o aportar a ella
+                         (tambien acepta /meta 500 viaje a Cusco directo)
   /exportar            - descargar todo tu historial en un archivo Excel
   /borrar              - menu para borrar: ultimo registro, presupuestos,
                          meta de ahorro o todo el historial (con confirmacion)
@@ -83,8 +83,7 @@ WELCOME = (
     "/presupuesto comida 200 - 🎯 define un limite mensual para una categoria "
     "(puede ser libre, ej. \"curso de gastronomia\")\n"
     "/presupuesto - 📊 ver tus limites actuales\n"
-    "/meta 500 viaje a Cusco - 🐷 define tu meta de ahorro y para que es\n"
-    "/aportar 50 - 💰 suma un aporte a tu meta de ahorro\n"
+    "/meta - 🐷 menu para crear tu meta de ahorro o aportar a ella\n"
     "/exportar - 📥 descarga todo tu historial en un archivo Excel\n"
     "/borrar - 🗑️ elige que borrar: tu ultimo registro, presupuestos, tu "
     "meta o todo tu historial (siempre te pido confirmar antes)\n"
@@ -115,8 +114,7 @@ WELCOME_EN = (
     "/presupuesto comida 200 - 🎯 set a monthly limit for a category (can be "
     "a free label, e.g. \"cooking course\")\n"
     "/presupuesto - 📊 view your current limits\n"
-    "/meta 500 trip to Cusco - 🐷 set your savings goal and what it's for\n"
-    "/aportar 50 - 💰 log a contribution toward your savings goal\n"
+    "/meta - 🐷 menu to create your savings goal or contribute to it\n"
     "/exportar - 📥 download your full history as an Excel file\n"
     "/borrar - 🗑️ pick what to delete: your last entry, budgets, your "
     "goal, or all your data (always asks to confirm first)\n"
@@ -139,8 +137,7 @@ BOT_COMMANDS = [
     BotCommand(command="moneda", description="Definir tu moneda"),
     BotCommand(command="categorias", description="Ver tus categorias segun tus habitos"),
     BotCommand(command="presupuesto", description="Ver o definir limites mensuales"),
-    BotCommand(command="meta", description="Definir o ver tu meta de ahorro"),
-    BotCommand(command="aportar", description="Sumar un aporte a tu meta de ahorro"),
+    BotCommand(command="meta", description="Crear tu meta de ahorro o aportar a ella"),
     BotCommand(command="exportar", description="Descargar tu historial en Excel"),
     BotCommand(command="borrar", description="Elegir que borrar (registro, presupuestos, meta o todo)"),
     BotCommand(command="logros", description="Ver tus medallas"),
@@ -188,6 +185,11 @@ PENDING_CUSTOM_CATEGORY: dict[int, int] = {}
 # dia en particular o de un rango de fechas y le toca escribirlo en su
 # proximo mensaje (en vez de que se interprete como un nuevo registro).
 PENDING_SUMMARY_INPUT: dict[int, str] = {}
+
+# user_id -> "aportar" o "crear": cuando el usuario eligio una opcion del
+# menu de /meta y le toca escribir el monto (y, si es "crear", la
+# descripcion) en su proximo mensaje.
+PENDING_GOAL_INPUT: dict[int, str] = {}
 
 # codigo -> (emoji, titulo, descripcion)
 ACHIEVEMENTS = {
@@ -420,10 +422,10 @@ async def _send_full_report(message: Message, user_id: int, start: dt.datetime |
         para = f" para \"{html.escape(goal['label'])}\"" if goal["label"] else ""
         paragraphs.append(
             f"<b>Meta de ahorro{para}:</b> vas en el {pct:.0f}%, llevas aportado "
-            f"{aportado:.2f} de {target:.2f} {currency} (usa /aportar para sumar)."
+            f"{aportado:.2f} de {target:.2f} {currency} (usa /meta para sumar)."
         )
 
-    paragraphs.append("🐱 Usa /presupuesto, /meta o /aportar para actualizar cualquiera de estos.")
+    paragraphs.append("🐱 Usa /presupuesto o /meta para actualizar cualquiera de estos.")
 
     await message.answer("\n\n".join(paragraphs), parse_mode="HTML")
 
@@ -600,64 +602,144 @@ async def cmd_budget(message: Message, command: CommandObject):
     )
 
 
-@dp.message(Command("meta", ignore_case=True))
-async def cmd_goal(message: Message, command: CommandObject):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    currency = db.get_currency(message.from_user.id)
-
-    if not command.args:
-        goal = db.get_goal(message.from_user.id)
-        if not goal:
-            await message.answer(
-                "No tienes una meta de ahorro todavia. Usa \"/meta 500 viaje a "
-                "Cusco\" para definir cuanto quieres ahorrar y para que "
-                "(la descripcion es opcional)."
-            )
-            return
-        aportado = db.get_goal_contributions_sum(message.from_user.id, goal["created_at"])
-        target = goal["target_amount"]
-        label = goal["label"]
-        pct = (aportado / target * 100) if target else 0
-        pct = max(0, min(100, pct))
-        para = f" para \"{label}\"" if label else ""
-        await message.answer(
-            f"🐷 Tu meta{para} es ahorrar {target:.2f} {currency}.\n"
-            f"Llevas aportado {aportado:.2f} {currency} ({pct:.0f}%). Usa "
-            f"\"/aportar 50\" para sumar a tu meta cuando apartes algo.\n"
-            f"Usa \"/meta {target:.0f}{' ' + label if label else ''}\" de nuevo "
-            f"para reiniciarla."
-        )
-        return
-
-    parts = command.args.strip().split(maxsplit=1)
+async def _process_goal_creation(message: Message, user_id: int, args_text: str) -> bool:
+    """Parsea "<monto> [descripcion]" y crea/actualiza la meta. Devuelve True
+    si se guardo, False si hubo un error de formato (y ya se le aviso)."""
+    currency = db.get_currency(user_id)
+    parts = args_text.strip().split(maxsplit=1)
     try:
         target_amount = float(parts[0].replace(",", "."))
-    except ValueError:
+    except (ValueError, IndexError):
         await message.answer(
-            "Formato: /meta 500 viaje a Cusco (la descripcion despues del "
-            "monto es opcional)."
+            "Formato: 500 viaje a Cusco (la descripcion despues del monto es "
+            "opcional)."
         )
-        return
+        return False
 
     if target_amount <= 0:
         await message.answer("El monto debe ser mayor que cero.")
-        return
+        return False
 
     label = parts[1].strip() if len(parts) > 1 else None
-    db.set_goal(message.from_user.id, target_amount, label)
+    db.set_goal(user_id, target_amount, label)
     para = f" para \"{label}\"" if label else ""
     await message.answer(
         f"🐷 Meta guardada: ahorrar {target_amount:.2f} {currency}{para}. Usa "
-        f"\"/aportar 50\" cada vez que apartes algo, y te ire mostrando tu "
-        f"avance con /meta."
+        f"/meta cuando quieras aportar o ver tu avance."
     )
+    return True
+
+
+async def _process_contribution(message: Message, user_id: int, amount_text: str) -> bool:
+    """Parsea un monto y lo suma a la meta actual. Devuelve True si se
+    registro, False si hubo un error de formato (y ya se le aviso). Asume que
+    ya se verifico que existe una meta."""
+    currency = db.get_currency(user_id)
+    goal = db.get_goal(user_id)
+    try:
+        amount = float(amount_text.strip().split()[0].replace(",", "."))
+    except (ValueError, IndexError):
+        await message.answer("Monto invalido. Ejemplo: 50")
+        return False
+
+    if amount <= 0:
+        await message.answer("El monto debe ser mayor que cero.")
+        return False
+
+    db.add_goal_contribution(user_id, amount)
+    aportado = db.get_goal_contributions_sum(user_id, goal["created_at"])
+    target = goal["target_amount"]
+    label = goal["label"]
+    pct = max(0, min(100, (aportado / target * 100) if target else 0))
+    para = f" para \"{label}\"" if label else ""
+    await message.answer(
+        f"💰 Aporte registrado: {amount:.2f} {currency}.\n"
+        f"Llevas {aportado:.2f} / {target:.2f} {currency} ({pct:.0f}%){para}."
+    )
+    await _check_goal_achievements(message, user_id)
+    return True
+
+
+@dp.message(Command("meta", ignore_case=True))
+async def cmd_goal(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    db.ensure_user(user_id, message.from_user.username)
+    currency = db.get_currency(user_id)
+
+    if command.args:
+        # Atajo directo para quien ya se sabe el formato: /meta 500 viaje.
+        await _process_goal_creation(message, user_id, command.args)
+        return
+
+    goal = db.get_goal(user_id)
+    if not goal:
+        status_text = (
+            "No tienes una meta de ahorro todavia. Usa \"🎯 Crear meta\" para "
+            "definir cuanto quieres ahorrar y para que (la descripcion es "
+            "opcional)."
+        )
+    else:
+        aportado = db.get_goal_contributions_sum(user_id, goal["created_at"])
+        target = goal["target_amount"]
+        label = goal["label"]
+        pct = max(0, min(100, (aportado / target * 100) if target else 0))
+        para = f" para \"{label}\"" if label else ""
+        status_text = (
+            f"🐷 Tu meta{para} es ahorrar {target:.2f} {currency}.\n"
+            f"Llevas aportado {aportado:.2f} {currency} ({pct:.0f}%)."
+        )
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="💰 Aportar", callback_data="metamenu:aportar"),
+            InlineKeyboardButton(text="🎯 Crear/actualizar meta", callback_data="metamenu:crear"),
+        ]]
+    )
+    await message.answer(status_text, reply_markup=keyboard)
+
+
+@dp.callback_query(F.data.startswith("metamenu:"))
+async def cb_metamenu(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    choice = callback.data.split(":", 1)[1]
+
+    if choice == "aportar":
+        goal = db.get_goal(user_id)
+        if not goal:
+            if callback.message:
+                await callback.message.edit_text(
+                    "Todavia no tienes una meta de ahorro. Escribe /meta de "
+                    "nuevo y usa \"🎯 Crear/actualizar meta\" primero."
+                )
+            await callback.answer()
+            return
+        PENDING_GOAL_INPUT[user_id] = "aportar"
+        if callback.message:
+            await callback.message.edit_text("¿Cuanto quieres aportar? Escribe el monto, ej. 50.")
+        await callback.answer()
+        return
+
+    if choice == "crear":
+        PENDING_GOAL_INPUT[user_id] = "crear"
+        if callback.message:
+            await callback.message.edit_text(
+                "Escribe el monto de tu meta y, si quieres, para que es. "
+                "Ej: \"500 viaje a Cusco\"."
+            )
+        await callback.answer()
+        return
+
+    await callback.answer()
 
 
 @dp.message(Command("aportar", ignore_case=True))
 async def cmd_contribute(message: Message, command: CommandObject):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    currency = db.get_currency(message.from_user.id)
-    goal = db.get_goal(message.from_user.id)
+    # Se mantiene funcionando (sin publicitarse en /ayuda ni en el menu de
+    # comandos) por si alguien lo escribe por costumbre: ahora la forma
+    # principal de aportar es /meta > "Aportar".
+    user_id = message.from_user.id
+    db.ensure_user(user_id, message.from_user.username)
+    goal = db.get_goal(user_id)
 
     if not goal:
         await message.answer(
@@ -670,27 +752,7 @@ async def cmd_contribute(message: Message, command: CommandObject):
         await message.answer("¿Cuanto quieres aportar? Ejemplo: /aportar 50")
         return
 
-    try:
-        amount = float(command.args.strip().split()[0].replace(",", "."))
-    except ValueError:
-        await message.answer("Monto invalido. Ejemplo: /aportar 50")
-        return
-
-    if amount <= 0:
-        await message.answer("El monto debe ser mayor que cero.")
-        return
-
-    db.add_goal_contribution(message.from_user.id, amount)
-    aportado = db.get_goal_contributions_sum(message.from_user.id, goal["created_at"])
-    target = goal["target_amount"]
-    label = goal["label"]
-    pct = max(0, min(100, (aportado / target * 100) if target else 0))
-    para = f" para \"{label}\"" if label else ""
-    await message.answer(
-        f"💰 Aporte registrado: {amount:.2f} {currency}.\n"
-        f"Llevas {aportado:.2f} / {target:.2f} {currency} ({pct:.0f}%){para}."
-    )
-    await _check_goal_achievements(message, message.from_user.id)
+    await _process_contribution(message, user_id, command.args)
 
 
 @dp.message(Command("exportar", ignore_case=True))
@@ -1288,6 +1350,22 @@ async def handle_text(message: Message):
         await _send_full_report(
             message, user_id, start, end, f"del {d1.isoformat()} al {d2.isoformat()}"
         )
+        return
+
+    pending_goal = PENDING_GOAL_INPUT.pop(user_id, None)
+    if pending_goal == "aportar":
+        if db.get_goal(user_id) is None:
+            await message.answer("Ya no tienes una meta de ahorro activa. Usa /meta para crear una.")
+            return
+        ok = await _process_contribution(message, user_id, message.text)
+        if not ok:
+            PENDING_GOAL_INPUT[user_id] = "aportar"
+        return
+
+    if pending_goal == "crear":
+        ok = await _process_goal_creation(message, user_id, message.text)
+        if not ok:
+            PENDING_GOAL_INPUT[user_id] = "crear"
         return
 
     pending_tx_id = PENDING_CUSTOM_CATEGORY.pop(user_id, None)
