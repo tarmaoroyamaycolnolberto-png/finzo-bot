@@ -98,18 +98,6 @@ def init_db():
         )
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS challenges (
-                user_id INTEGER PRIMARY KEY,
-                category TEXT NOT NULL,
-                started_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                ends_at TEXT NOT NULL,
-                accepted INTEGER NOT NULL DEFAULT 0,
-                resolved INTEGER NOT NULL DEFAULT 0
-            )
-            """
-        )
-        conn.execute(
-            """
             CREATE TABLE IF NOT EXISTS goal_contributions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -516,7 +504,6 @@ def delete_all_user_data(user_id: int):
         conn.execute("DELETE FROM goal_contributions WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM ai_usage WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM achievements WHERE user_id = ?", (user_id,))
-        conn.execute("DELETE FROM challenges WHERE user_id = ?", (user_id,))
         conn.execute("UPDATE pet SET mood = 70 WHERE user_id = ?", (user_id,))
 
 
@@ -573,72 +560,3 @@ def adjust_pet_mood(user_id: int, delta: int):
         )
 
 
-# --- Retos de ahorro ------------------------------------------------------
-
-def get_top_expense_category(user_id: int, days: int = 30):
-    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
-    with get_conn() as conn:
-        return conn.execute(
-            """
-            SELECT category, SUM(amount) as total
-            FROM transactions
-            WHERE user_id = ? AND kind = 'gasto' AND created_at >= ?
-            GROUP BY category
-            ORDER BY total DESC
-            LIMIT 1
-            """,
-            (user_id, since),
-        ).fetchone()
-
-
-def get_category_spent_since(user_id: int, category: str, since: str) -> float:
-    with get_conn() as conn:
-        row = conn.execute(
-            """
-            SELECT COALESCE(SUM(amount), 0) as total
-            FROM transactions
-            WHERE user_id = ? AND kind = 'gasto' AND category = ? AND created_at >= ?
-            """,
-            (user_id, category, since),
-        ).fetchone()
-        return row["total"]
-
-
-def propose_challenge(user_id: int, category: str, ends_at: str):
-    with get_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO challenges (user_id, category, started_at, ends_at, accepted, resolved)
-            VALUES (?, ?, CURRENT_TIMESTAMP, ?, 0, 0)
-            ON CONFLICT(user_id) DO UPDATE SET
-                category = excluded.category,
-                started_at = CURRENT_TIMESTAMP,
-                ends_at = excluded.ends_at,
-                accepted = 0,
-                resolved = 0
-            """,
-            (user_id, category, ends_at),
-        )
-
-
-def accept_challenge(user_id: int):
-    with get_conn() as conn:
-        conn.execute(
-            "UPDATE challenges SET accepted = 1, started_at = CURRENT_TIMESTAMP WHERE user_id = ?",
-            (user_id,),
-        )
-
-
-def resolve_challenge(user_id: int):
-    with get_conn() as conn:
-        conn.execute(
-            "UPDATE challenges SET resolved = 1 WHERE user_id = ?", (user_id,)
-        )
-
-
-def get_challenge(user_id: int):
-    with get_conn() as conn:
-        return conn.execute(
-            "SELECT category, started_at, ends_at, accepted, resolved FROM challenges WHERE user_id = ?",
-            (user_id,),
-        ).fetchone()

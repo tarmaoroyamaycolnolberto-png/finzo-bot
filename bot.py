@@ -17,7 +17,6 @@ Comandos:
                          meta de ahorro o todo el historial (con confirmacion)
   /logros              - ve tus medallas ganadas
   /mascota             - revisa el animo de Meow (tamagotchi financiero)
-  /reto                - recibe/revisa un reto de ahorro personalizado
   /feedback            - mandale un comentario o reporte a quien mantiene el bot
   /idioma es|en        - elegir idioma (afecta el mensaje de bienvenida)
   /ayuda               - vuelve a mostrar las instrucciones
@@ -89,7 +88,6 @@ WELCOME = (
     "meta o todo tu historial (siempre te pido confirmar antes)\n"
     "/logros - 🏅 ve las medallas que has ganado\n"
     "/mascota - 🐱 revisa el animo de Meow (sube si ahorras, baja si te pasas)\n"
-    "/reto - 🔥 recibe un reto de ahorro personalizado de 5 dias\n"
     "/feedback - 💬 mandame un comentario o reporte un problema\n"
     "/idioma en - 🌐 cambia el idioma (es/en)\n"
     "/ayuda - ❓ vuelve a mostrar este mensaje\n\n"
@@ -119,7 +117,6 @@ WELCOME_EN = (
     "goal, or all your data (always asks to confirm first)\n"
     "/logros - 🏅 see the achievements you've earned\n"
     "/mascota - 🐱 check Meow's mood (goes up when you save, down when you overspend)\n"
-    "/reto - 🔥 get a personalized 5-day savings challenge\n"
     "/feedback - 💬 send a comment or report a problem\n"
     "/idioma es - 🌐 switch language (es/en)\n"
     "/ayuda - ❓ show this message again\n\n"
@@ -141,7 +138,6 @@ BOT_COMMANDS = [
     BotCommand(command="borrar", description="Elegir que borrar (registro, presupuestos, meta o todo)"),
     BotCommand(command="logros", description="Ver tus medallas"),
     BotCommand(command="mascota", description="Ver el animo de Meow"),
-    BotCommand(command="reto", description="Recibir o revisar un reto de ahorro"),
     BotCommand(command="feedback", description="Enviar un comentario o reportar un problema"),
     BotCommand(command="idioma", description="Cambiar idioma (es/en)"),
     BotCommand(command="ayuda", description="Ver los comandos disponibles"),
@@ -203,7 +199,6 @@ ACHIEVEMENTS = {
     "primer_aporte": ("🌱", "Primer aporte", "Hiciste tu primer aporte hacia tu meta de ahorro."),
     "meta_cumplida": ("🏆", "¡Meta cumplida!", "Llegaste al 100% de tu meta de ahorro."),
     "presupuesto_bajo_control": ("🛡️", "Bajo control", "Ninguno de tus presupuestos esta pasado de su limite."),
-    "reto_superado": ("🔥", "Reto superado", "Cumpliste un reto de ahorro de principio a fin."),
 }
 
 @dp.message(Command("start", ignore_case=True))
@@ -1259,103 +1254,6 @@ def _confirm_keyboard(tx_id: int, kind: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=flip_label, callback_data=f"flipkind:{tx_id}")],
         ]
     )
-
-
-@dp.message(Command("reto", ignore_case=True))
-async def cmd_challenge(message: Message):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    user_id = message.from_user.id
-    currency = db.get_currency(user_id)
-    challenge = db.get_challenge(user_id)
-
-    if challenge and not challenge["resolved"]:
-        if not challenge["accepted"]:
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[[
-                    InlineKeyboardButton(text="✅ Acepto el reto", callback_data="reto:si"),
-                    InlineKeyboardButton(text="❌ Ahora no", callback_data="reto:no"),
-                ]]
-            )
-            await message.answer(
-                f"Ya te habia propuesto un reto de $0 en \"{challenge['category']}\". "
-                "¿Lo aceptas?",
-                reply_markup=keyboard,
-            )
-            return
-
-        now_iso = dt.datetime.utcnow().isoformat()
-        if now_iso < challenge["ends_at"]:
-            spent = db.get_category_spent_since(user_id, challenge["category"], challenge["started_at"])
-            if spent > 0:
-                await message.answer(
-                    f"😿 Vas a mitad de tu reto de \"{challenge['category']}\" y ya "
-                    f"gastaste {spent:.2f} {currency} ahi. ¡Todavia puedes recuperarte!"
-                )
-            else:
-                await message.answer(
-                    f"🔥 Vas perfecto en tu reto de $0 en \"{challenge['category']}\": "
-                    f"0.00 {currency} gastados hasta ahora. ¡Sigue asi!"
-                )
-            return
-
-        spent = db.get_category_spent_since(user_id, challenge["category"], challenge["started_at"])
-        db.resolve_challenge(user_id)
-        if spent <= 0:
-            db.adjust_pet_mood(user_id, 10)
-            await message.answer(
-                f"🎉 ¡Reto superado! No gastaste nada en \"{challenge['category']}\" "
-                "durante 5 dias."
-            )
-            await _award(message, user_id, "reto_superado")
-        else:
-            await message.answer(
-                f"El reto en \"{challenge['category']}\" ya termino: gastaste "
-                f"{spent:.2f} {currency} ahi. ¡La proxima lo logras! Usa /reto "
-                "para un nuevo desafio."
-            )
-        return
-
-    top = db.get_top_expense_category(user_id, days=30)
-    if not top:
-        await message.answer(
-            "Todavia no tengo suficientes gastos tuyos para proponerte un reto. "
-            "Registra algunos movimientos y vuelve a intentar con /reto."
-        )
-        return
-
-    category = top["category"]
-    ends_at = (dt.datetime.utcnow() + dt.timedelta(days=5)).isoformat()
-    db.propose_challenge(user_id, category, ends_at)
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Acepto el reto", callback_data="reto:si"),
-            InlineKeyboardButton(text="❌ Ahora no", callback_data="reto:no"),
-        ]]
-    )
-    await message.answer(
-        f"He notado que gastas bastante en \"{category}\" 👀. ¿Aceptas el reto de "
-        f"gastar $0 en \"{category}\" los proximos 5 dias?",
-        reply_markup=keyboard,
-    )
-
-
-@dp.callback_query(F.data == "reto:si")
-async def cb_challenge_accept(callback: CallbackQuery):
-    db.accept_challenge(callback.from_user.id)
-    if callback.message:
-        await callback.message.edit_text(
-            "💪 ¡Reto aceptado! Te voy a estar avisando cuando uses /reto de "
-            "nuevo. En 5 dias vemos como te fue."
-        )
-    await callback.answer("Reto aceptado")
-
-
-@dp.callback_query(F.data == "reto:no")
-async def cb_challenge_decline(callback: CallbackQuery):
-    db.resolve_challenge(callback.from_user.id)
-    if callback.message:
-        await callback.message.edit_text("Sin problema, no acepte el reto. Puedes pedir otro con /reto cuando quieras.")
-    await callback.answer()
 
 
 @dp.message(F.text)
