@@ -1158,12 +1158,34 @@ async def cmd_admin(message: Message):
     today = dt.datetime.utcnow().date().isoformat()
     total_users = db.get_user_count()
     ai_today = db.get_total_ai_usage(today)
-    await message.answer(
-        "📊 Estado de Meow:\n"
-        f"Usuarios registrados: {total_users}\n"
-        f"Mensajes procesados con IA hoy: {ai_today}\n"
-        f"Limite diario de IA por usuario: {AI_DAILY_LIMIT}"
-    )
+
+    active_subs = db.get_active_subscribers_count()
+    total_payments = db.get_total_star_payments_count()
+    total_stars = db.get_total_stars_revenue()
+    since_30d = (dt.datetime.utcnow() - dt.timedelta(days=30)).isoformat()
+    stars_30d = db.get_stars_revenue_since(since_30d)
+
+    lines = [
+        "📊 Estado de Meow:",
+        f"Usuarios registrados: {total_users}",
+        f"Mensajes procesados con IA hoy: {ai_today}",
+        f"Limite diario de IA por usuario: {AI_DAILY_LIMIT}",
+        "",
+        "⭐ Suscripciones:",
+        f"Suscriptores activos ahora mismo: {active_subs}",
+        f"Pagos con Stars recibidos en total: {total_payments}",
+        f"Stars cobradas en total: {total_stars}",
+        f"Stars cobradas en los ultimos 30 dias: {stars_30d}",
+    ]
+
+    recent = db.get_recent_star_payments(5)
+    if recent:
+        lines.append("\nUltimos pagos:")
+        for row in recent:
+            fecha = row["created_at"][:10]
+            lines.append(f"  - {row['amount']} Stars el {fecha} (usuario {row['user_id']})")
+
+    await message.answer("\n".join(lines))
 
 
 async def _award(message: Message, user_id: int, code: str):
@@ -1360,6 +1382,7 @@ async def process_successful_payment(message: Message):
         expires_at = (dt.datetime.utcnow() + dt.timedelta(days=30)).isoformat()
 
     db.set_subscription(user_id, expires_at, sp.telegram_payment_charge_id)
+    db.log_star_payment(user_id, sp.total_amount, sp.telegram_payment_charge_id)
     exp_dt = dt.datetime.fromisoformat(expires_at)
     await message.answer(
         f"⭐ ¡Gracias por suscribirte! Tu suscripcion esta activa hasta el "

@@ -115,6 +115,17 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS star_payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                charge_id TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         # Migraciones suaves: agregan columnas nuevas si la base de datos
         # viene de una version anterior que no las tenia.
         for statement in (
@@ -603,5 +614,57 @@ def is_premium(user_id: int) -> bool:
     if not expires_at:
         return False
     return expires_at > datetime.utcnow().isoformat()
+
+
+def log_star_payment(user_id: int, amount: int, charge_id: str | None):
+    """Registra cada pago con Stars que llega (primer pago o renovacion), para
+    poder ver cuantas suscripciones y cuantas Stars se han cobrado en total."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO star_payments (user_id, amount, charge_id) VALUES (?, ?, ?)",
+            (user_id, amount, charge_id),
+        )
+
+
+def get_active_subscribers_count() -> int:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as n FROM subscriptions WHERE expires_at > ?",
+            (datetime.utcnow().isoformat(),),
+        ).fetchone()
+        return row["n"]
+
+
+def get_total_star_payments_count() -> int:
+    """Cuantos pagos con Stars se han recibido en total (primeros pagos +
+    renovaciones), no usuarios unicos."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) as n FROM star_payments").fetchone()
+        return row["n"]
+
+
+def get_total_stars_revenue() -> int:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) as total FROM star_payments"
+        ).fetchone()
+        return row["total"]
+
+
+def get_stars_revenue_since(since_iso: str) -> int:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) as total FROM star_payments WHERE created_at >= ?",
+            (since_iso,),
+        ).fetchone()
+        return row["total"]
+
+
+def get_recent_star_payments(limit: int = 10):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT user_id, amount, created_at FROM star_payments ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
 
 
