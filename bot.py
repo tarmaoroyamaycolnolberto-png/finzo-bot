@@ -17,6 +17,8 @@ Comandos:
                          meta de ahorro o todo el historial (con confirmacion)
   /logros              - ve tus medallas ganadas
   /mascota             - revisa el animo de Meow (tamagotchi financiero)
+  /suscripcion         - ve tu estado (registros gratis restantes o tu
+                         suscripcion activa) y suscribete con Telegram Stars
   /feedback            - mandale un comentario o reporte a quien mantiene el bot
   /idioma es|en        - elegir idioma (afecta el mensaje de bienvenida)
   /ayuda               - vuelve a mostrar las instrucciones
@@ -29,6 +31,12 @@ esta bien; si no, deja elegir la correcta o cambiar el tipo con botones.
 Para controlar el costo de la IA cuando hay muchos usuarios, cada usuario
 tiene una cuota diaria de mensajes analizados con IA (AI_DAILY_LIMIT); al
 superarla, el bot sigue funcionando con un analisis por palabras clave.
+
+Modelo freemium: cada usuario tiene FREE_TX_LIMIT registros gratis (gastos,
+ingresos y aportes a metas cuentan igual). Al llegar al limite, puede seguir
+viendo resumenes/presupuestos/meta pero no anotar mas hasta suscribirse por
+SUBSCRIPTION_STARS Stars al mes (pago nativo de Telegram, moneda "XTR"), que
+se renueva solo cada 30 dias.
 """
 
 import asyncio
@@ -47,7 +55,9 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LabeledPrice,
     Message,
+    PreCheckoutQuery,
 )
 from dotenv import load_dotenv
 
@@ -62,6 +72,14 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_TELEGRAM_ID = os.getenv("ADMIN_TELEGRAM_ID")
 AI_DAILY_LIMIT = int(os.getenv("AI_DAILY_LIMIT", "50"))
 PERU_UTC_OFFSET = -5  # para el resumen semanal automatico
+
+# Modelo freemium: 50 registros gratis (gastos/ingresos/aportes), despues
+# hace falta la suscripcion mensual para seguir anotando. Se cobra con
+# Telegram Stars (moneda "XTR"), que Telegram renueva sola cada 30 dias.
+FREE_TX_LIMIT = 50
+SUBSCRIPTION_STARS = 99
+SUBSCRIPTION_PERIOD_SECONDS = 2592000  # 30 dias, el unico valor que Telegram acepta hoy
+SUBSCRIPTION_PAYLOAD = "meow_premium_mensual"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("finzo")
@@ -88,13 +106,17 @@ WELCOME = (
     "meta o todo tu historial (siempre te pido confirmar antes)\n"
     "/logros - 🏅 ve las medallas que has ganado\n"
     "/mascota - 🐱 revisa el animo de Meow (sube si ahorras, baja si te pasas)\n"
+    "/suscripcion - ⭐ revisa tus registros gratis restantes o tu suscripcion\n"
     "/feedback - 💬 mandame un comentario o reporte un problema\n"
     "/idioma en - 🌐 cambia el idioma (es/en)\n"
     "/ayuda - ❓ vuelve a mostrar este mensaje\n\n"
     "🤖 La categoria de cada registro la decide una IA. Por eso, despues de "
     "cada uno te voy a preguntar si esta bien; si marcas que no, te dejo "
     "elegir la categoria correcta o cambiar el tipo (gasto/ingreso) con "
-    "botones 👇."
+    "botones 👇.\n\n"
+    f"🆓 Tienes {FREE_TX_LIMIT} registros gratis. Cuando se acaben, puedes "
+    f"suscribirte por {SUBSCRIPTION_STARS} Stars al mes con /suscripcion "
+    "para seguir sin limite."
 )
 
 WELCOME_EN = (
@@ -117,6 +139,7 @@ WELCOME_EN = (
     "goal, or all your data (always asks to confirm first)\n"
     "/logros - 🏅 see the achievements you've earned\n"
     "/mascota - 🐱 check Meow's mood (goes up when you save, down when you overspend)\n"
+    "/suscripcion - ⭐ check your free entries left or your subscription\n"
     "/feedback - 💬 send a comment or report a problem\n"
     "/idioma es - 🌐 switch language (es/en)\n"
     "/ayuda - ❓ show this message again\n\n"
@@ -138,6 +161,7 @@ BOT_COMMANDS = [
     BotCommand(command="borrar", description="Elegir que borrar (registro, presupuestos, meta o todo)"),
     BotCommand(command="logros", description="Ver tus medallas"),
     BotCommand(command="mascota", description="Ver el animo de Meow"),
+    BotCommand(command="suscripcion", description="Ver tus registros gratis o suscribirte"),
     BotCommand(command="feedback", description="Enviar un comentario o reportar un problema"),
     BotCommand(command="idioma", description="Cambiar idioma (es/en)"),
     BotCommand(command="ayuda", description="Ver los comandos disponibles"),
@@ -685,6 +709,9 @@ async def _process_contribution(message: Message, user_id: int, amount_text: str
         await message.answer("El monto debe ser mayor que cero.")
         return False
 
+    if not await _check_and_block_limit(message, user_id):
+        return False
+
     db.add_goal_contribution(user_id, amount)
     target = goal["target_amount"]
     label = goal["label"]
@@ -708,6 +735,7 @@ async def _process_contribution(message: Message, user_id: int, amount_text: str
     await _check_goal_achievements(message, user_id)
     await _check_registro_achievements(message, user_id)
     await _check_budget_alert(message, user_id, "ahorro")
+    await _maybe_warn_limit(message, user_id)
     return True
 
 
@@ -1208,6 +1236,138 @@ async def cmd_pet(message: Message):
     )
 
 
+# --- Suscripcion mensual (Telegram Stars) --------------------------------
+#
+# Cada gasto/ingreso/aporte cuenta como un registro. Los primeros
+# FREE_TX_LIMIT son gratis; despues, el usuario puede seguir viendo todo
+# (resumenes, presupuestos, meta) pero no anotar nada nuevo hasta pagar la
+# suscripcion mensual con Telegram Stars, que Telegram renueva sola.
+
+def _subscribe_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text=f"⭐ Suscribirme ({SUBSCRIPTION_STARS} Stars/mes)",
+                callback_data="premium:subscribe",
+            )
+        ]]
+    )
+
+
+async def _check_and_block_limit(message: Message, user_id: int) -> bool:
+    """Devuelve True si el usuario puede seguir registrando (sigue dentro de
+    sus registros gratis o ya tiene la suscripcion activa). Si no puede, le
+    avisa con el boton para suscribirse y devuelve False."""
+    if db.is_premium(user_id):
+        return True
+    if db.get_transaction_count(user_id) < FREE_TX_LIMIT:
+        return True
+    await message.answer(
+        f"Llegaste a tus {FREE_TX_LIMIT} registros gratis 🐾. Puedes seguir "
+        "viendo tus resumenes, presupuestos y meta sin problema, pero para "
+        "anotar nuevos gastos, ingresos o aportes necesitas la suscripcion "
+        "mensual.",
+        reply_markup=_subscribe_keyboard(),
+    )
+    return False
+
+
+async def _maybe_warn_limit(message: Message, user_id: int):
+    """Avisa una sola vez, a los FREE_TX_LIMIT - 10 registros, que se estan
+    por acabar los registros gratis."""
+    if db.is_premium(user_id):
+        return
+    count = db.get_transaction_count(user_id)
+    if count == FREE_TX_LIMIT - 10:
+        await message.answer(
+            f"ℹ️ Te quedan 10 registros gratis (llevas {count}/{FREE_TX_LIMIT}). "
+            "Usa /suscripcion para ver tus opciones y seguir sin limite cuando "
+            "se acaben."
+        )
+
+
+@dp.message(Command("suscripcion", ignore_case=True))
+async def cmd_subscription(message: Message):
+    user_id = message.from_user.id
+    db.ensure_user(user_id, message.from_user.username)
+
+    if db.is_premium(user_id):
+        expires_at = db.get_subscription_expiry(user_id)
+        exp_dt = dt.datetime.fromisoformat(expires_at)
+        await message.answer(
+            f"⭐ Tu suscripcion esta activa hasta el {exp_dt.strftime('%d/%m/%Y')}.\n"
+            "Telegram la renueva sola cada mes con tus Stars, no necesitas "
+            "hacer nada."
+        )
+        return
+
+    count = db.get_transaction_count(user_id)
+    restantes = max(0, FREE_TX_LIMIT - count)
+    if restantes > 0:
+        estado = f"Llevas {count}/{FREE_TX_LIMIT} registros gratis (te quedan {restantes})."
+    else:
+        estado = f"Ya usaste tus {FREE_TX_LIMIT} registros gratis."
+
+    await message.answer(
+        f"{estado}\n\nCon la suscripcion mensual ({SUBSCRIPTION_STARS} Stars) "
+        "tienes registros ilimitados, pagando directo con Telegram Stars "
+        "(se renueva sola cada mes).",
+        reply_markup=_subscribe_keyboard(),
+    )
+
+
+@dp.callback_query(F.data == "premium:subscribe")
+async def cb_premium_subscribe(callback: CallbackQuery):
+    link = await callback.bot.create_invoice_link(
+        title="Suscripcion mensual Meow",
+        description=(
+            "Registros ilimitados en Meow durante 30 dias. Se renueva "
+            "automaticamente cada mes con tus Telegram Stars."
+        ),
+        payload=SUBSCRIPTION_PAYLOAD,
+        currency="XTR",
+        prices=[LabeledPrice(label="Suscripcion mensual", amount=SUBSCRIPTION_STARS)],
+        subscription_period=SUBSCRIPTION_PERIOD_SECONDS,
+    )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text=f"⭐ Pagar {SUBSCRIPTION_STARS} Stars", url=link)
+        ]]
+    )
+    if callback.message:
+        await callback.message.answer(
+            "Toca el boton para completar el pago con Telegram Stars:",
+            reply_markup=keyboard,
+        )
+    await callback.answer()
+
+
+@dp.pre_checkout_query()
+async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
+    await pre_checkout_query.answer(ok=True)
+
+
+@dp.message(F.successful_payment)
+async def process_successful_payment(message: Message):
+    sp = message.successful_payment
+    user_id = message.from_user.id
+    db.ensure_user(user_id, message.from_user.username)
+
+    exp_ts = getattr(sp, "subscription_expiration_date", None)
+    if exp_ts:
+        expires_at = dt.datetime.utcfromtimestamp(exp_ts).isoformat()
+    else:
+        expires_at = (dt.datetime.utcnow() + dt.timedelta(days=30)).isoformat()
+
+    db.set_subscription(user_id, expires_at, sp.telegram_payment_charge_id)
+    exp_dt = dt.datetime.fromisoformat(expires_at)
+    await message.answer(
+        f"⭐ ¡Gracias por suscribirte! Tu suscripcion esta activa hasta el "
+        f"{exp_dt.strftime('%d/%m/%Y')} y se renueva sola cada mes con tus "
+        "Stars. Ya puedes seguir registrando sin limite."
+    )
+
+
 async def _check_budget_alert(message: Message, user_id: int, category: str):
     budgets = {b["category"]: b["limit_amount"] for b in db.get_budgets(user_id)}
     limit_amount = budgets.get(category)
@@ -1359,6 +1519,8 @@ async def handle_text(message: Message):
         return
 
     kind, amount, category = result
+    if not await _check_and_block_limit(message, user_id):
+        return
     tx_id = db.add_transaction(user_id, kind, amount, category, message.text)
     currency = db.get_currency(user_id)
 
@@ -1383,6 +1545,7 @@ async def handle_text(message: Message):
         db.adjust_pet_mood(user_id, 3)
 
     await _check_registro_achievements(message, user_id)
+    await _maybe_warn_limit(message, user_id)
 
 
 @dp.callback_query(F.data.startswith("catok:"))

@@ -106,6 +106,15 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                user_id INTEGER PRIMARY KEY,
+                expires_at TEXT,
+                charge_id TEXT
+            )
+            """
+        )
         # Migraciones suaves: agregan columnas nuevas si la base de datos
         # viene de una version anterior que no las tenia.
         for statement in (
@@ -558,5 +567,41 @@ def adjust_pet_mood(user_id: int, delta: int):
             "UPDATE pet SET mood = MAX(0, MIN(100, mood + ?)) WHERE user_id = ?",
             (delta, user_id),
         )
+
+
+# --- Suscripcion mensual (Telegram Stars) -------------------------------
+#
+# Se guarda solo la fecha hasta la que la suscripcion esta activa. Telegram
+# renueva la suscripcion solo cada 30 dias y nos avisa con un nuevo
+# successful_payment; si no se puede cobrar, simplemente no llega ese aviso
+# y expires_at queda vencido, con lo que is_premium() vuelve a dar False.
+
+def set_subscription(user_id: int, expires_at_iso: str, charge_id: str | None):
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO subscriptions (user_id, expires_at, charge_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                expires_at = excluded.expires_at,
+                charge_id = excluded.charge_id
+            """,
+            (user_id, expires_at_iso, charge_id),
+        )
+
+
+def get_subscription_expiry(user_id: int) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT expires_at FROM subscriptions WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return row["expires_at"] if row else None
+
+
+def is_premium(user_id: int) -> bool:
+    expires_at = get_subscription_expiry(user_id)
+    if not expires_at:
+        return False
+    return expires_at > datetime.utcnow().isoformat()
 
 
