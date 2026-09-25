@@ -1495,6 +1495,17 @@ async def weekly_summary_task(bot: Bot):
             await asyncio.sleep(3600)
 
 
+BOT_DESCRIPTION = (
+    "🐾 ¡Hola! Soy Meow 💰✨ Te ayudo a controlar tus finanzas personales sin "
+    "hojas de calculo ni apps complicadas. Solo cuentame que gastaste o "
+    "recibiste, como si le hablaras a un amigo 💬🐱.\n\n"
+    "Tambien te ayudo a poner presupuestos por categoria, definir una meta "
+    "de ahorro con aportes reales, ver resumenes completos por periodo, y "
+    "te doy medallas 🏅 por tus buenos habitos."
+)
+BOT_SHORT_DESCRIPTION = "Tu asistente de finanzas: gastos, presupuestos, metas de ahorro y mas 💰🐱"
+
+
 async def main():
     if not BOT_TOKEN:
         raise RuntimeError("Falta BOT_TOKEN en el archivo .env")
@@ -1502,6 +1513,11 @@ async def main():
     db.init_db()
     bot = Bot(token=BOT_TOKEN)
     await bot.set_my_commands(BOT_COMMANDS)
+    try:
+        await bot.set_my_description(BOT_DESCRIPTION)
+        await bot.set_my_short_description(BOT_SHORT_DESCRIPTION)
+    except Exception as exc:
+        logger.warning("No se pudo actualizar la descripcion del bot: %s", exc)
     asyncio.create_task(weekly_summary_task(bot))
     logger.info("Finzo esta corriendo...")
     await dp.start_polling(bot)
