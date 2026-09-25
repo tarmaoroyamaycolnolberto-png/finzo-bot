@@ -15,7 +15,6 @@ Comandos:
   /logros              - ve tus medallas ganadas
   /mascota             - revisa el animo de Meow (tamagotchi financiero)
   /reto                - recibe/revisa un reto de ahorro personalizado
-  /comprar 250 algo    - consultor de compras: te ayuda a decidir si comprar
   /feedback            - mandale un comentario o reporte a quien mantiene el bot
   /idioma es|en        - elegir idioma (afecta el mensaje de bienvenida)
   /ayuda               - vuelve a mostrar las instrucciones
@@ -36,7 +35,6 @@ import datetime as dt
 import io
 import logging
 import os
-import re
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
@@ -89,7 +87,6 @@ WELCOME = (
     "/logros - 🏅 ve las medallas que has ganado\n"
     "/mascota - 🐱 revisa el animo de Meow (sube si ahorras, baja si te pasas)\n"
     "/reto - 🔥 recibe un reto de ahorro personalizado de 5 dias\n"
-    "/comprar 250 audifonos - 🛍️ pregunta si te conviene una compra\n"
     "/feedback - 💬 mandame un comentario o reporte un problema\n"
     "/idioma en - 🌐 cambia el idioma (es/en)\n"
     "/ayuda - ❓ vuelve a mostrar este mensaje\n\n"
@@ -121,7 +118,6 @@ WELCOME_EN = (
     "/logros - 🏅 see the achievements you've earned\n"
     "/mascota - 🐱 check Meow's mood (goes up when you save, down when you overspend)\n"
     "/reto - 🔥 get a personalized 5-day savings challenge\n"
-    "/comprar 250 headphones - 🛍️ ask whether a purchase is a good idea\n"
     "/feedback - 💬 send a comment or report a problem\n"
     "/idioma es - 🌐 switch language (es/en)\n"
     "/ayuda - ❓ show this message again\n\n"
@@ -145,7 +141,6 @@ BOT_COMMANDS = [
     BotCommand(command="logros", description="Ver tus medallas"),
     BotCommand(command="mascota", description="Ver el animo de Meow"),
     BotCommand(command="reto", description="Recibir o revisar un reto de ahorro"),
-    BotCommand(command="comprar", description="Consultar si te conviene una compra"),
     BotCommand(command="feedback", description="Enviar un comentario o reportar un problema"),
     BotCommand(command="idioma", description="Cambiar idioma (es/en)"),
     BotCommand(command="ayuda", description="Ver los comandos disponibles"),
@@ -194,82 +189,6 @@ ACHIEVEMENTS = {
     "presupuesto_bajo_control": ("🛡️", "Bajo control", "Ninguno de tus presupuestos esta pasado de su limite."),
     "reto_superado": ("🔥", "Reto superado", "Cumpliste un reto de ahorro de principio a fin."),
 }
-
-# user_id -> {"amount": float, "desc": str, "type": str, "step": int, "yes": int}
-# estado del flujo de preguntas de /comprar.
-PENDING_PURCHASE: dict[int, dict] = {}
-
-# El monto puede ir en cualquier parte del texto ("250 audifonos" o "un
-# audifono de 250"); se toma el primer numero que aparezca.
-PURCHASE_AMOUNT_RE = re.compile(r"(\d+(?:[.,]\d{1,2})?)")
-PURCHASE_CURRENCY_WORDS = {
-    "soles", "sol", "dolares", "dólares", "usd", "pen", "mxn", "eur",
-    "euros", "pesos", "usd.",
-}
-
-INVESTMENT_KEYWORDS = [
-    "accion", "acciones", "invertir", "inversion", "inversión", "cripto",
-    "criptomoneda", "bitcoin", "ethereum", "fondo mutuo", "fondos mutuos",
-    "bono", "bonos", "trading", "forex", "etf", "dividendo", "dividendos",
-]
-
-# Distintas preguntas segun el tipo de "compra": una compra de consumo se
-# evalua por impulso/necesidad, una inversion se evalua por riesgo y colchon
-# financiero, que es un criterio totalmente distinto.
-COMPRAR_QUESTIONS = {
-    "compra": [
-        "1/3 · ¿Lo necesitas de verdad, o es mas un antojo del momento?",
-        "2/3 · Si esperaras 30 dias, ¿seguirias queriendo comprarlo?",
-        "3/3 · ¿Ya tienes algo en casa que cumple mas o menos la misma funcion?",
-    ],
-    "inversion": [
-        "1/3 · ¿Ya tienes un fondo de emergencia aparte de este dinero (3-6 "
-        "meses de tus gastos)?",
-        "2/3 · ¿Entiendes que podrias perder parte o todo este dinero, sin "
-        "que eso afecte tus gastos basicos?",
-        "3/3 · ¿Es dinero que no vas a necesitar en el corto plazo (al menos "
-        "el proximo año)?",
-    ],
-}
-
-
-def _parse_purchase_args(args: str):
-    """Extrae el monto (en cualquier posicion del texto) y una descripcion a
-    partir de los argumentos de /comprar. Devuelve (amount, desc) o
-    (None, None) si no encuentra un monto valido."""
-    match = PURCHASE_AMOUNT_RE.search(args)
-    if not match:
-        return None, None
-    try:
-        amount = float(match.group(1).replace(",", "."))
-    except ValueError:
-        return None, None
-    if amount <= 0:
-        return None, None
-
-    before = args[:match.start()].strip()
-    after = args[match.end():].strip()
-    after_words = after.split()
-    if after_words and after_words[0].lower().strip(".,") in PURCHASE_CURRENCY_WORDS:
-        after_words = after_words[1:]
-    after = " ".join(after_words)
-
-    desc = " ".join(part for part in (before, after) if part).strip()
-    desc = re.sub(r"^(de|en)\s+", "", desc, flags=re.IGNORECASE)
-    desc = re.sub(r"\s+(de|en)$", "", desc, flags=re.IGNORECASE)
-    desc = desc.strip() or "eso"
-    return amount, desc
-
-
-def _classify_purchase(desc: str) -> str:
-    """'inversion' si la descripcion suena a una inversion (acciones, cripto,
-    etc.), 'compra' para cualquier otra cosa (el caso comun: un producto)."""
-    lowered = desc.lower()
-    for keyword in INVESTMENT_KEYWORDS:
-        if keyword in lowered:
-            return "inversion"
-    return "compra"
-
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
@@ -903,138 +822,6 @@ async def cb_challenge_decline(callback: CallbackQuery):
     db.resolve_challenge(callback.from_user.id)
     if callback.message:
         await callback.message.edit_text("Sin problema, no acepte el reto. Puedes pedir otro con /reto cuando quieras.")
-    await callback.answer()
-
-
-@dp.message(Command("comprar"))
-async def cmd_purchase(message: Message, command: CommandObject):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    if not command.args:
-        await message.answer(
-            "Cuentame cuanto cuesta y que quieres comprar (el monto puede ir "
-            "en cualquier parte). Ejemplos:\n"
-            "/comprar 250 audifonos nuevos\n"
-            "/comprar un audifono de 20 soles\n"
-            "/comprar 1000 en acciones de Amazon"
-        )
-        return
-
-    amount, desc = _parse_purchase_args(command.args.strip())
-    if amount is None:
-        await message.answer(
-            "No encontre un monto valido ahi. Ejemplo: \"/comprar 250 "
-            "audifonos nuevos\" o \"/comprar un audifono de 20 soles\"."
-        )
-        return
-
-    purchase_type = _classify_purchase(desc)
-    questions = COMPRAR_QUESTIONS[purchase_type]
-    PENDING_PURCHASE[message.from_user.id] = {
-        "amount": amount, "desc": desc, "type": purchase_type, "step": 0, "yes": 0,
-    }
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(text="Si", callback_data="buy:si"),
-            InlineKeyboardButton(text="No", callback_data="buy:no"),
-        ]]
-    )
-    if purchase_type == "inversion":
-        intro = f"📈 Vamos a evaluar si te conviene invertir en \"{desc}\" ({amount:.2f})."
-    else:
-        intro = f"🐱 Vamos a evaluar si te conviene comprar \"{desc}\" ({amount:.2f})."
-    await message.answer(f"{intro}\n\n{questions[0]}", reply_markup=keyboard)
-
-
-@dp.callback_query(F.data.startswith("buy:"))
-async def cb_purchase_answer(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    state = PENDING_PURCHASE.get(user_id)
-    if not state:
-        await callback.answer("Esta consulta ya no esta activa, usa /comprar de nuevo.")
-        return
-
-    answer = callback.data.split(":", 1)[1]
-    if answer == "si":
-        state["yes"] += 1
-    state["step"] += 1
-
-    questions = COMPRAR_QUESTIONS[state["type"]]
-    if state["step"] < len(questions):
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[
-                InlineKeyboardButton(text="Si", callback_data="buy:si"),
-                InlineKeyboardButton(text="No", callback_data="buy:no"),
-            ]]
-        )
-        if callback.message:
-            await callback.message.edit_text(
-                questions[state["step"]], reply_markup=keyboard
-            )
-        await callback.answer()
-        return
-
-    PENDING_PURCHASE.pop(user_id, None)
-    amount = state["amount"]
-    desc = state["desc"]
-    yes_count = state["yes"]
-    currency = db.get_currency(user_id)
-    summary = db.get_summary(user_id, "mes")
-    balance = summary["balance"]
-
-    if state["type"] == "inversion":
-        if yes_count <= 1:
-            veredicto = (
-                f"😼 Veredicto: TODAVIA NO. Antes de invertir en \"{desc}\", "
-                "asegurate de tener un colchon de emergencia aparte y de "
-                "entender bien el riesgo. No hay apuro."
-            )
-        elif balance - amount < 0:
-            veredicto = (
-                f"🙀 Veredicto: CUIDADO. Invertir {amount:.2f} {currency} en "
-                f"\"{desc}\" te dejaria en numeros rojos este mes "
-                f"({balance:.2f} {currency} de balance)."
-            )
-        elif balance > 0 and amount > balance * 0.5:
-            veredicto = (
-                f"😾 Veredicto: CON CALMA. {amount:.2f} {currency} es mas de "
-                f"la mitad de tu balance de este mes; considera invertir solo "
-                f"una parte en \"{desc}\" y diversificar en vez de ir con todo."
-            )
-        else:
-            veredicto = (
-                f"😻 Veredicto: SUENA RAZONABLE. Tienes claro el riesgo y tu "
-                f"balance de este mes ({balance:.2f} {currency}) lo puede "
-                f"soportar. Aun asi, recuerda que toda inversion tiene "
-                "riesgo, por mas segura que parezca."
-            )
-    else:
-        if yes_count <= 1:
-            veredicto = (
-                f"😼 Veredicto: MEJOR ESPERA. Tus respuestas suenan a antojo del "
-                f"momento mas que a necesidad real. Dale unos dias a la idea de "
-                f"\"{desc}\" antes de comprarlo."
-            )
-        elif balance - amount < 0:
-            veredicto = (
-                f"🙀 Veredicto: CUIDADO. Con tu balance actual del mes "
-                f"({balance:.2f} {currency}), comprar \"{desc}\" por {amount:.2f} te "
-                f"dejaria en numeros rojos este mes."
-            )
-        elif balance > 0 and amount > balance * 0.5:
-            veredicto = (
-                f"😾 Veredicto: PIENSALO BIEN. \"{desc}\" ({amount:.2f} {currency}) "
-                f"se llevaria mas de la mitad de tu balance de este mes "
-                f"({balance:.2f} {currency}). No es un no, pero evalua si vale la pena."
-            )
-        else:
-            veredicto = (
-                f"😻 Veredicto: ADELANTE. Parece que realmente lo necesitas y tu "
-                f"balance de este mes ({balance:.2f} {currency}) lo aguanta bien. "
-                f"¡Disfruta \"{desc}\"!"
-            )
-
-    if callback.message:
-        await callback.message.edit_text(veredicto)
     await callback.answer()
 
 
