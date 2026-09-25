@@ -292,6 +292,40 @@ def get_summary(user_id: int, period: str = "semana"):
     }
 
 
+def get_summary_range(user_id: int, start_iso: str | None, end_iso: str | None):
+    """Como get_summary, pero con un rango de fechas explicito (o abierto en
+    cualquiera de los dos extremos). start_iso es inclusivo, end_iso es
+    exclusivo -- asi se puede pedir "todo un dia" con end = dia siguiente."""
+    query = (
+        "SELECT kind, category, SUM(amount) as total, COUNT(*) as n "
+        "FROM transactions WHERE user_id = ?"
+    )
+    params: list = [user_id]
+    if start_iso:
+        query += " AND created_at >= ?"
+        params.append(start_iso)
+    if end_iso:
+        query += " AND created_at < ?"
+        params.append(end_iso)
+    query += " GROUP BY kind, category ORDER BY kind, total DESC"
+
+    with get_conn() as conn:
+        rows = conn.execute(query, params).fetchall()
+
+    ingresos = [r for r in rows if r["kind"] == "ingreso"]
+    gastos = [r for r in rows if r["kind"] == "gasto"]
+    total_ingresos = sum(r["total"] for r in ingresos)
+    total_gastos = sum(r["total"] for r in gastos)
+
+    return {
+        "total_ingresos": total_ingresos,
+        "total_gastos": total_gastos,
+        "balance": total_ingresos - total_gastos,
+        "ingresos_por_categoria": ingresos,
+        "gastos_por_categoria": gastos,
+    }
+
+
 def set_budget(user_id: int, category: str, limit_amount: float):
     with get_conn() as conn:
         conn.execute(

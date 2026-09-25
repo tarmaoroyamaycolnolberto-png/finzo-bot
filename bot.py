@@ -3,8 +3,9 @@
 Comandos:
   /start               - registra al usuario (pide moneda si es nuevo)
   /moneda USD          - define la moneda principal del usuario
-  /resumen semana      - resumen de los ultimos 7 dias (con grafico)
-  /resumen mes         - resumen de los ultimos 30 dias (con grafico)
+  /resumen             - menu para elegir el periodo (hoy, semana, mes,
+                         un dia, un rango o todo) y ver un resumen completo:
+                         ingresos/gastos, presupuestos y meta de ahorro
   /categorias          - ve las categorias que se formaron segun tus registros
   /presupuesto         - ver tus limites de gasto por categoria
   /presupuesto X 200   - definir un limite mensual de 200 para la categoria X
@@ -33,6 +34,7 @@ superarla, el bot sigue funcionando con un analisis por palabras clave.
 import asyncio
 import calendar
 import datetime as dt
+import html
 import io
 import logging
 import os
@@ -74,8 +76,8 @@ WELCOME = (
     "  - \"me pagaron 300\"\n"
     "  - \"spent $20 on transport\"\n\n"
     "📋 Comandos utiles:\n"
-    "/resumen semana - 📅 tus totales de los ultimos 7 dias (con grafico)\n"
-    "/resumen mes - 🗓️ tus totales de los ultimos 30 dias\n"
+    "/resumen - 📊 elige el periodo (hoy, semana, mes, un dia, un rango o "
+    "todo) y te doy un resumen completo: ingresos/gastos, presupuestos y meta\n"
     "/moneda USD - 💱 define tu moneda (ej. PEN, USD, MXN, EUR)\n"
     "/categorias - 🏷️ ve las categorias que se formaron segun tus registros\n"
     "/presupuesto comida 200 - 🎯 define un limite mensual para una categoria "
@@ -106,8 +108,8 @@ WELCOME_EN = (
     "  - \"got paid 300\"\n"
     "  - \"gaste 20 en el almuerzo\"\n\n"
     "📋 Useful commands:\n"
-    "/resumen semana - 📅 your totals for the last 7 days (with a chart)\n"
-    "/resumen mes - 🗓️ your totals for the last 30 days\n"
+    "/resumen - 📊 pick a period (today, week, month, a day, a range or "
+    "all-time) and get a full report: income/expenses, budgets and your goal\n"
     "/moneda USD - 💱 set your currency (e.g. PEN, USD, MXN, EUR)\n"
     "/categorias - 🏷️ see the categories that formed from your own habits\n"
     "/presupuesto comida 200 - 🎯 set a monthly limit for a category (can be "
@@ -133,7 +135,7 @@ WELCOME_EN = (
 
 BOT_COMMANDS = [
     BotCommand(command="start", description="Registrarte y ver la intro"),
-    BotCommand(command="resumen", description="Resumen semana o mes"),
+    BotCommand(command="resumen", description="Ver tu resumen (elige el periodo)"),
     BotCommand(command="moneda", description="Definir tu moneda"),
     BotCommand(command="categorias", description="Ver tus categorias segun tus habitos"),
     BotCommand(command="presupuesto", description="Ver o definir limites mensuales"),
@@ -181,6 +183,11 @@ CURRENCY_OPTIONS = ["PEN", "USD", "MXN", "EUR", "COP", "ARS"]
 # escribir el nombre en su proximo mensaje (en vez de que se interprete
 # como un nuevo registro de gasto/ingreso).
 PENDING_CUSTOM_CATEGORY: dict[int, int] = {}
+
+# user_id -> "date" o "range": cuando el usuario eligio ver el resumen de un
+# dia en particular o de un rango de fechas y le toca escribirlo en su
+# proximo mensaje (en vez de que se interprete como un nuevo registro).
+PENDING_SUMMARY_INPUT: dict[int, str] = {}
 
 # codigo -> (emoji, titulo, descripcion)
 ACHIEVEMENTS = {
@@ -310,31 +317,115 @@ def _build_category_chart(rows, currency: str):
     return buffer
 
 
-@dp.message(Command("resumen", ignore_case=True))
-async def cmd_summary(message: Message, command: CommandObject):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    period = "semana"
-    if command.args and "mes" in command.args.lower():
-        period = "mes"
+def _parse_report_date(text: str) -> dt.date | None:
+    """Intenta leer una fecha en formatos comunes: AAAA-MM-DD, DD/MM/AAAA,
+    DD-MM-AAAA. Devuelve None si no se pudo interpretar."""
+    text = text.strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y"):
+        try:
+            return dt.datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
 
-    summary = db.get_summary(message.from_user.id, period)
-    currency = db.get_currency(message.from_user.id)
-    etiqueta = "ultimos 7 dias" if period == "semana" else "ultimos 30 dias"
 
-    lines = [f"Resumen ({etiqueta}) en {currency}:"]
-    lines.append(f"Ingresos: {summary['total_ingresos']:.2f}")
-    lines.append(f"Gastos: {summary['total_gastos']:.2f}")
-    lines.append(f"Balance: {summary['balance']:.2f}")
+def _parse_report_range(text: str):
+    """Intenta leer dos fechas de un texto libre, ej. "2026-09-01 al
+    2026-09-24" o "2026-09-01 2026-09-24". Devuelve (fecha_inicio, fecha_fin)
+    ya ordenadas, o None si no se pudieron leer ambas."""
+    text = text.strip().lower()
+    for sep in (" al ", " a ", " hasta ", " - "):
+        if sep in text:
+            left, right = text.split(sep, 1)
+            d1, d2 = _parse_report_date(left), _parse_report_date(right)
+            if d1 and d2:
+                return (d1, d2) if d1 <= d2 else (d2, d1)
 
-    if summary["gastos_por_categoria"]:
-        lines.append("\nGastos por categoria:")
-        for row in summary["gastos_por_categoria"]:
-            lines.append(f"  - {row['category']}: {row['total']:.2f} ({row['n']} registros)")
+    dates = [d for d in (_parse_report_date(tok) for tok in text.split()) if d]
+    if len(dates) >= 2:
+        d1, d2 = dates[0], dates[-1]
+        return (d1, d2) if d1 <= d2 else (d2, d1)
+    return None
 
-    if not summary["gastos_por_categoria"] and not summary["ingresos_por_categoria"]:
-        lines.append("\nTodavia no registras nada en este periodo. Escribeme algo como \"gaste 20 en almuerzo\".")
 
-    await message.answer("\n".join(lines))
+async def _send_full_report(message: Message, user_id: int, start: dt.datetime | None, end: dt.datetime | None, label: str):
+    """Arma y manda el resumen tipo articulo: ingresos/gastos/balance del
+    periodo elegido, mas el estado actual de presupuestos y meta de ahorro
+    (esos dos son "estado actual", no dependen del periodo elegido)."""
+    db.ensure_user(user_id, None)
+    currency = db.get_currency(user_id)
+    start_iso = start.isoformat() if start else None
+    end_iso = end.isoformat() if end else None
+    summary = db.get_summary_range(user_id, start_iso, end_iso)
+
+    ingresos = summary["total_ingresos"]
+    gastos = summary["total_gastos"]
+    balance = summary["balance"]
+
+    paragraphs = [f"📊 <b>Tu resumen — {html.escape(label)}</b>"]
+
+    if ingresos == 0 and gastos == 0:
+        paragraphs.append(f"No registraste nada en {label}. Escribeme algo como \"gaste 20 en el mercado\" para empezar.")
+    else:
+        saldo_txt = "un balance positivo" if balance >= 0 else "un balance negativo"
+        p = (
+            f"Durante {label}, tus ingresos sumaron <b>{ingresos:.2f} {currency}</b> y "
+            f"tus gastos <b>{gastos:.2f} {currency}</b>, asi que te queda {saldo_txt} "
+            f"de <b>{balance:.2f} {currency}</b>."
+        )
+        gastos_cat = summary["gastos_por_categoria"]
+        if gastos_cat:
+            top = sorted(gastos_cat, key=lambda r: r["total"], reverse=True)[:3]
+            frases = [f"<b>{html.escape(r['category'])}</b> ({r['total']:.2f} {currency})" for r in top]
+            if len(frases) == 1:
+                detalle = frases[0]
+            elif len(frases) == 2:
+                detalle = f"{frases[0]} y {frases[1]}"
+            else:
+                detalle = f"{', '.join(frases[:-1])} y {frases[-1]}"
+            p += f" La mayor parte de tus gastos fue en {detalle}."
+            if len(gastos_cat) > 3:
+                p += " y otras categorias."
+        paragraphs.append(p)
+
+    # --- Presupuestos: estado actual (siempre del mes en curso) ---
+    budgets = db.get_budgets(user_id)
+    if not budgets:
+        paragraphs.append(
+            "<b>Presupuestos:</b> no tienes ninguno definido. Usa \"/presupuesto "
+            "comida 200\" para poner un limite mensual."
+        )
+    else:
+        budget_lines = ["<b>Presupuestos de este mes:</b>"]
+        for row in budgets:
+            spent = db.get_month_spent(user_id, row["category"])
+            estado = "⚠️ superado" if spent > row["limit_amount"] else "✅ bajo control"
+            budget_lines.append(
+                f"- {html.escape(row['category'])}: {spent:.2f} / {row['limit_amount']:.2f} "
+                f"{currency} ({estado})"
+            )
+        paragraphs.append("\n".join(budget_lines))
+
+    # --- Meta de ahorro: estado actual ---
+    goal = db.get_goal(user_id)
+    if not goal:
+        paragraphs.append(
+            "<b>Meta de ahorro:</b> no tienes ninguna activa. Usa \"/meta 500 viaje "
+            "a Cusco\" para definir una."
+        )
+    else:
+        aportado = db.get_goal_contributions_sum(user_id, goal["created_at"])
+        target = goal["target_amount"]
+        pct = max(0, min(100, (aportado / target * 100) if target else 0))
+        para = f" para \"{html.escape(goal['label'])}\"" if goal["label"] else ""
+        paragraphs.append(
+            f"<b>Meta de ahorro{para}:</b> vas en el {pct:.0f}%, llevas aportado "
+            f"{aportado:.2f} de {target:.2f} {currency} (usa /aportar para sumar)."
+        )
+
+    paragraphs.append("🐱 Usa /presupuesto, /meta o /aportar para actualizar cualquiera de estos.")
+
+    await message.answer("\n\n".join(paragraphs), parse_mode="HTML")
 
     try:
         chart_buffer = _build_category_chart(summary["gastos_por_categoria"], currency)
@@ -343,6 +434,80 @@ async def cmd_summary(message: Message, command: CommandObject):
             await message.answer_photo(photo, caption="📊 Gastos por categoria")
     except Exception as exc:
         logger.warning("No se pudo generar el grafico de resumen: %s", exc)
+
+
+@dp.message(Command("resumen", ignore_case=True))
+async def cmd_summary(message: Message):
+    db.ensure_user(message.from_user.id, message.from_user.username)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Hoy", callback_data="resumen:hoy"),
+                InlineKeyboardButton(text="Esta semana", callback_data="resumen:semana"),
+            ],
+            [
+                InlineKeyboardButton(text="Este mes", callback_data="resumen:mes"),
+                InlineKeyboardButton(text="Todo el historial", callback_data="resumen:todo"),
+            ],
+            [
+                InlineKeyboardButton(text="📅 Un dia en particular", callback_data="resumen:dia"),
+                InlineKeyboardButton(text="📆 Un rango de fechas", callback_data="resumen:rango"),
+            ],
+            [InlineKeyboardButton(text="Cancelar", callback_data="delcancel")],
+        ]
+    )
+    await message.answer("¿De que periodo quieres tu resumen?", reply_markup=keyboard)
+
+
+@dp.callback_query(F.data.startswith("resumen:"))
+async def cb_resumen_period(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    choice = callback.data.split(":", 1)[1]
+
+    if choice == "dia":
+        PENDING_SUMMARY_INPUT[user_id] = "date"
+        if callback.message:
+            await callback.message.edit_text(
+                "Escribeme la fecha que quieres ver, en formato AAAA-MM-DD "
+                "(ej. 2026-09-20)."
+            )
+        await callback.answer()
+        return
+
+    if choice == "rango":
+        PENDING_SUMMARY_INPUT[user_id] = "range"
+        if callback.message:
+            await callback.message.edit_text(
+                "Escribeme el rango de fechas, ej. \"2026-09-01 al 2026-09-24\"."
+            )
+        await callback.answer()
+        return
+
+    now = dt.datetime.utcnow()
+    if choice == "hoy":
+        start = dt.datetime(now.year, now.month, now.day)
+        end = start + dt.timedelta(days=1)
+        label = f"hoy ({start.date().isoformat()})"
+    elif choice == "semana":
+        start = now - dt.timedelta(days=7)
+        end = None
+        label = "los ultimos 7 dias"
+    elif choice == "mes":
+        start = dt.datetime(now.year, now.month, 1)
+        end = None
+        label = "este mes"
+    elif choice == "todo":
+        start = None
+        end = None
+        label = "todo tu historial"
+    else:
+        await callback.answer()
+        return
+
+    if callback.message:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await _send_full_report(callback.message, user_id, start, end, label)
+    await callback.answer()
 
 
 @dp.message(Command("categorias", ignore_case=True))
@@ -1094,6 +1259,37 @@ async def handle_text(message: Message):
     db.ensure_user(message.from_user.id, message.from_user.username)
     user_id = message.from_user.id
 
+    pending_summary = PENDING_SUMMARY_INPUT.pop(user_id, None)
+    if pending_summary == "date":
+        parsed = _parse_report_date(message.text)
+        if not parsed:
+            await message.answer(
+                "No pude leer esa fecha. Escribela como AAAA-MM-DD, ej. 2026-09-20."
+            )
+            PENDING_SUMMARY_INPUT[user_id] = "date"
+            return
+        start = dt.datetime(parsed.year, parsed.month, parsed.day)
+        end = start + dt.timedelta(days=1)
+        await _send_full_report(message, user_id, start, end, f"el {parsed.isoformat()}")
+        return
+
+    if pending_summary == "range":
+        parsed = _parse_report_range(message.text)
+        if not parsed:
+            await message.answer(
+                "No pude leer ese rango. Escribelo como \"2026-09-01 al "
+                "2026-09-24\"."
+            )
+            PENDING_SUMMARY_INPUT[user_id] = "range"
+            return
+        d1, d2 = parsed
+        start = dt.datetime(d1.year, d1.month, d1.day)
+        end = dt.datetime(d2.year, d2.month, d2.day) + dt.timedelta(days=1)
+        await _send_full_report(
+            message, user_id, start, end, f"del {d1.isoformat()} al {d2.isoformat()}"
+        )
+        return
+
     pending_tx_id = PENDING_CUSTOM_CATEGORY.pop(user_id, None)
     if pending_tx_id is not None:
         category = message.text.strip().lower()
@@ -1130,7 +1326,7 @@ async def handle_text(message: Message):
     verbo = "Registre un ingreso" if kind == "ingreso" else "Registre un gasto"
     await message.answer(
         f"{verbo} de {amount:.2f} {currency} en la categoria \"{category}\". "
-        f"¿Esta bien? (usa /resumen semana para ver tus totales)",
+        f"¿Esta bien? (usa /resumen para ver tus totales)",
         reply_markup=_confirm_keyboard(tx_id, kind),
     )
 
@@ -1250,7 +1446,7 @@ async def weekly_summary_task(bot: Bot):
                         f"Ingresos: {summary['total_ingresos']:.2f} {currency}",
                         f"Gastos: {summary['total_gastos']:.2f} {currency}",
                         f"Balance: {summary['balance']:.2f} {currency}",
-                        "\nEscribe /resumen semana para ver el detalle por categoria.",
+                        "\nEscribe /resumen para ver el detalle completo (categorias, presupuestos y tu meta).",
                     ]
                     await bot.send_message(user_id, "\n".join(lines))
                 except Exception as exc:
