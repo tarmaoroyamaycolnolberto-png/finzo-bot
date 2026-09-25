@@ -11,8 +11,8 @@ Comandos:
   /meta 500            - definir o ver tu meta de ahorro
   /aportar 50          - sumar un aporte hacia tu meta de ahorro
   /exportar            - descargar todo tu historial en un archivo Excel
-  /deshacer            - elimina tu ultimo registro
-  /borrartodo          - elimina TODO tu historial (con confirmacion)
+  /borrar              - menu para borrar: ultimo registro, presupuestos,
+                         meta de ahorro o todo el historial (con confirmacion)
   /logros              - ve tus medallas ganadas
   /mascota             - revisa el animo de Meow (tamagotchi financiero)
   /reto                - recibe/revisa un reto de ahorro personalizado
@@ -84,8 +84,8 @@ WELCOME = (
     "/meta 500 viaje a Cusco - 🐷 define tu meta de ahorro y para que es\n"
     "/aportar 50 - 💰 suma un aporte a tu meta de ahorro\n"
     "/exportar - 📥 descarga todo tu historial en un archivo Excel\n"
-    "/deshacer - ↩️ elimina tu ultimo registro si te equivocaste\n"
-    "/borrartodo - 🗑️ elimina TODO tu historial (con confirmacion)\n"
+    "/borrar - 🗑️ elige que borrar: tu ultimo registro, presupuestos, tu "
+    "meta o todo tu historial (siempre te pido confirmar antes)\n"
     "/logros - 🏅 ve las medallas que has ganado\n"
     "/mascota - 🐱 revisa el animo de Meow (sube si ahorras, baja si te pasas)\n"
     "/reto - 🔥 recibe un reto de ahorro personalizado de 5 dias\n"
@@ -116,8 +116,8 @@ WELCOME_EN = (
     "/meta 500 trip to Cusco - 🐷 set your savings goal and what it's for\n"
     "/aportar 50 - 💰 log a contribution toward your savings goal\n"
     "/exportar - 📥 download your full history as an Excel file\n"
-    "/deshacer - ↩️ undo your last entry if you made a mistake\n"
-    "/borrartodo - 🗑️ delete ALL your data (asks to confirm)\n"
+    "/borrar - 🗑️ pick what to delete: your last entry, budgets, your "
+    "goal, or all your data (always asks to confirm first)\n"
     "/logros - 🏅 see the achievements you've earned\n"
     "/mascota - 🐱 check Meow's mood (goes up when you save, down when you overspend)\n"
     "/reto - 🔥 get a personalized 5-day savings challenge\n"
@@ -140,8 +140,7 @@ BOT_COMMANDS = [
     BotCommand(command="meta", description="Definir o ver tu meta de ahorro"),
     BotCommand(command="aportar", description="Sumar un aporte a tu meta de ahorro"),
     BotCommand(command="exportar", description="Descargar tu historial en Excel"),
-    BotCommand(command="deshacer", description="Eliminar tu ultimo registro"),
-    BotCommand(command="borrartodo", description="Eliminar TODO tu historial"),
+    BotCommand(command="borrar", description="Elegir que borrar (registro, presupuestos, meta o todo)"),
     BotCommand(command="logros", description="Ver tus medallas"),
     BotCommand(command="mascota", description="Ver el animo de Meow"),
     BotCommand(command="reto", description="Recibir o revisar un reto de ahorro"),
@@ -194,7 +193,7 @@ ACHIEVEMENTS = {
     "reto_superado": ("🔥", "Reto superado", "Cumpliste un reto de ahorro de principio a fin."),
 }
 
-@dp.message(Command("start"))
+@dp.message(Command("start", ignore_case=True))
 async def cmd_start(message: Message):
     is_new = not db.user_exists(message.from_user.id)
     db.ensure_user(message.from_user.id, message.from_user.username)
@@ -228,14 +227,14 @@ async def cb_set_currency(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.message(Command("ayuda"))
+@dp.message(Command("ayuda", ignore_case=True))
 async def cmd_help(message: Message):
     db.ensure_user(message.from_user.id, message.from_user.username)
     lang = db.get_language(message.from_user.id)
     await message.answer(WELCOME_EN if lang == "en" else WELCOME)
 
 
-@dp.message(Command("idioma"))
+@dp.message(Command("idioma", ignore_case=True))
 async def cmd_language(message: Message, command: CommandObject):
     db.ensure_user(message.from_user.id, message.from_user.username)
     choice = (command.args or "").strip().lower()
@@ -252,7 +251,7 @@ async def cmd_language(message: Message, command: CommandObject):
         await message.answer("Listo, te muestro la intro en español de ahora en adelante.")
 
 
-@dp.message(Command("moneda"))
+@dp.message(Command("moneda", ignore_case=True))
 async def cmd_currency(message: Message, command: CommandObject):
     db.ensure_user(message.from_user.id, message.from_user.username)
     if not command.args:
@@ -311,7 +310,7 @@ def _build_category_chart(rows, currency: str):
     return buffer
 
 
-@dp.message(Command("resumen"))
+@dp.message(Command("resumen", ignore_case=True))
 async def cmd_summary(message: Message, command: CommandObject):
     db.ensure_user(message.from_user.id, message.from_user.username)
     period = "semana"
@@ -346,7 +345,7 @@ async def cmd_summary(message: Message, command: CommandObject):
         logger.warning("No se pudo generar el grafico de resumen: %s", exc)
 
 
-@dp.message(Command("categorias"))
+@dp.message(Command("categorias", ignore_case=True))
 async def cmd_categories(message: Message):
     db.ensure_user(message.from_user.id, message.from_user.username)
     rows = db.get_categories_summary(message.from_user.id)
@@ -379,7 +378,7 @@ async def cmd_categories(message: Message):
     await message.answer("\n".join(lines))
 
 
-@dp.message(Command("presupuesto"))
+@dp.message(Command("presupuesto", ignore_case=True))
 async def cmd_budget(message: Message, command: CommandObject):
     db.ensure_user(message.from_user.id, message.from_user.username)
     currency = db.get_currency(message.from_user.id)
@@ -436,7 +435,7 @@ async def cmd_budget(message: Message, command: CommandObject):
     )
 
 
-@dp.message(Command("meta"))
+@dp.message(Command("meta", ignore_case=True))
 async def cmd_goal(message: Message, command: CommandObject):
     db.ensure_user(message.from_user.id, message.from_user.username)
     currency = db.get_currency(message.from_user.id)
@@ -489,7 +488,7 @@ async def cmd_goal(message: Message, command: CommandObject):
     )
 
 
-@dp.message(Command("aportar"))
+@dp.message(Command("aportar", ignore_case=True))
 async def cmd_contribute(message: Message, command: CommandObject):
     db.ensure_user(message.from_user.id, message.from_user.username)
     currency = db.get_currency(message.from_user.id)
@@ -529,7 +528,7 @@ async def cmd_contribute(message: Message, command: CommandObject):
     await _check_goal_achievements(message, message.from_user.id)
 
 
-@dp.message(Command("exportar"))
+@dp.message(Command("exportar", ignore_case=True))
 async def cmd_export(message: Message):
     db.ensure_user(message.from_user.id, message.from_user.username)
     rows = db.get_all_transactions(message.from_user.id)
@@ -555,8 +554,17 @@ async def cmd_export(message: Message):
     await message.answer_document(file, caption="Aqui tienes todo tu historial en Excel.")
 
 
-@dp.message(Command("deshacer"))
+# user_id -> lista de categorias de presupuesto mostradas en el ultimo
+# menu de "Borrar presupuestos" (asi los botones no dependen de meter la
+# categoria completa, que puede ser texto libre largo, en el callback_data).
+PENDING_DELETE_BUDGETS: dict[int, list[str]] = {}
+
+
+@dp.message(Command("deshacer", ignore_case=True))
 async def cmd_undo(message: Message):
+    # Se mantiene funcionando (sin publicitarse en /ayuda ni en el menu de
+    # comandos) por si alguien lo escribe por costumbre: ahora la forma
+    # principal de deshacer un registro es /borrar.
     db.ensure_user(message.from_user.id, message.from_user.username)
     row = db.delete_last_transaction(message.from_user.id)
     if not row:
@@ -569,13 +577,15 @@ async def cmd_undo(message: Message):
     )
 
 
-@dp.message(Command("borrartodo"))
+@dp.message(Command("borrartodo", ignore_case=True))
 async def cmd_delete_all(message: Message):
+    # Igual que /deshacer: se mantiene por costumbre, pero /borrar > "Borrar
+    # todo" es la forma que se muestra ahora.
     db.ensure_user(message.from_user.id, message.from_user.username)
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[[
             InlineKeyboardButton(text="⚠️ Si, borrar todo", callback_data="delall:confirm"),
-            InlineKeyboardButton(text="Cancelar", callback_data="delall:cancel"),
+            InlineKeyboardButton(text="Cancelar", callback_data="delcancel"),
         ]]
     )
     await message.answer(
@@ -596,14 +606,222 @@ async def cb_delete_all_confirm(callback: CallbackQuery):
     await callback.answer("Datos borrados")
 
 
-@dp.callback_query(F.data == "delall:cancel")
-async def cb_delete_all_cancel(callback: CallbackQuery):
+@dp.callback_query(F.data == "delcancel")
+async def cb_delete_cancel(callback: CallbackQuery):
+    PENDING_DELETE_BUDGETS.pop(callback.from_user.id, None)
     if callback.message:
         await callback.message.edit_text("Cancelado, no borre nada.")
     await callback.answer()
 
 
-@dp.message(Command("feedback"))
+@dp.message(Command("borrar", ignore_case=True))
+async def cmd_delete_menu(message: Message):
+    db.ensure_user(message.from_user.id, message.from_user.username)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="↩️ Borrar el ultimo registro", callback_data="delmenu:last")],
+            [InlineKeyboardButton(text="🎯 Borrar presupuestos", callback_data="delmenu:budgets")],
+            [InlineKeyboardButton(text="🐷 Borrar mi meta de ahorro", callback_data="delmenu:goal")],
+            [InlineKeyboardButton(text="🗑️ Borrar TODO mi historial", callback_data="delmenu:all")],
+            [InlineKeyboardButton(text="Cancelar", callback_data="delcancel")],
+        ]
+    )
+    await message.answer("¿Que quieres borrar?", reply_markup=keyboard)
+
+
+@dp.callback_query(F.data == "delmenu:last")
+async def cb_delmenu_last(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    tx = db.get_last_transaction(user_id)
+    if not tx:
+        if callback.message:
+            await callback.message.edit_text("No tienes registros para borrar.")
+        await callback.answer()
+        return
+    currency = db.get_currency(user_id)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="⚠️ Si, borrarlo", callback_data="dellast:confirm"),
+            InlineKeyboardButton(text="Cancelar", callback_data="delcancel"),
+        ]]
+    )
+    if callback.message:
+        await callback.message.edit_text(
+            f"¿Seguro que quieres borrar tu ultimo registro: {tx['kind']} de "
+            f"{tx['amount']:.2f} {currency} en \"{tx['category']}\"?",
+            reply_markup=keyboard,
+        )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "dellast:confirm")
+async def cb_dellast_confirm(callback: CallbackQuery):
+    row = db.delete_last_transaction(callback.from_user.id)
+    if callback.message:
+        if row:
+            currency = db.get_currency(callback.from_user.id)
+            await callback.message.edit_text(
+                f"↩️ Listo, borre tu ultimo registro: {row['kind']} de "
+                f"{row['amount']:.2f} {currency} en \"{row['category']}\"."
+            )
+        else:
+            await callback.message.edit_text("No tenias registros para borrar.")
+    await callback.answer("Listo")
+
+
+@dp.callback_query(F.data == "delmenu:budgets")
+async def cb_delmenu_budgets(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    budgets = db.get_budgets(user_id)
+    if not budgets:
+        if callback.message:
+            await callback.message.edit_text("No tienes presupuestos definidos.")
+        await callback.answer()
+        return
+
+    categories = [b["category"] for b in budgets]
+    PENDING_DELETE_BUDGETS[user_id] = categories
+    rows = [
+        [InlineKeyboardButton(text=cat, callback_data=f"delbud:{i}")]
+        for i, cat in enumerate(categories)
+    ]
+    rows.append([InlineKeyboardButton(text="🗑️ Todos los presupuestos", callback_data="delbud:all")])
+    rows.append([InlineKeyboardButton(text="Cancelar", callback_data="delcancel")])
+    if callback.message:
+        await callback.message.edit_text(
+            "¿Cual presupuesto quieres borrar?", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+        )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("delbud:"))
+async def cb_delbud_pick(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    choice = callback.data.split(":", 1)[1]
+
+    if choice == "all":
+        categories = PENDING_DELETE_BUDGETS.get(user_id) or [b["category"] for b in db.get_budgets(user_id)]
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(text="⚠️ Si, borrar todos", callback_data="delbudconfirm:all"),
+                InlineKeyboardButton(text="Cancelar", callback_data="delcancel"),
+            ]]
+        )
+        if callback.message:
+            await callback.message.edit_text(
+                f"¿Seguro que quieres borrar tus {len(categories)} presupuestos?",
+                reply_markup=keyboard,
+            )
+        await callback.answer()
+        return
+
+    categories = PENDING_DELETE_BUDGETS.get(user_id)
+    try:
+        category = categories[int(choice)]
+    except (TypeError, ValueError, IndexError):
+        if callback.message:
+            await callback.message.edit_text("Esa opcion ya no es valida, usa /borrar de nuevo.")
+        await callback.answer()
+        return
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="⚠️ Si, borrarlo", callback_data=f"delbudconfirm:{choice}"),
+            InlineKeyboardButton(text="Cancelar", callback_data="delcancel"),
+        ]]
+    )
+    if callback.message:
+        await callback.message.edit_text(
+            f"¿Seguro que quieres borrar tu presupuesto de \"{category}\"?",
+            reply_markup=keyboard,
+        )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("delbudconfirm:"))
+async def cb_delbud_confirm(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    choice = callback.data.split(":", 1)[1]
+
+    if choice == "all":
+        db.delete_all_budgets(user_id)
+        PENDING_DELETE_BUDGETS.pop(user_id, None)
+        if callback.message:
+            await callback.message.edit_text("🗑️ Listo, borre todos tus presupuestos.")
+        await callback.answer("Presupuestos borrados")
+        return
+
+    categories = PENDING_DELETE_BUDGETS.pop(user_id, None)
+    try:
+        category = categories[int(choice)]
+    except (TypeError, ValueError, IndexError):
+        if callback.message:
+            await callback.message.edit_text("Esa opcion ya no es valida, usa /borrar de nuevo.")
+        await callback.answer()
+        return
+
+    db.delete_budget(user_id, category)
+    if callback.message:
+        await callback.message.edit_text(f"🗑️ Listo, borre tu presupuesto de \"{category}\".")
+    await callback.answer("Presupuesto borrado")
+
+
+@dp.callback_query(F.data == "delmenu:goal")
+async def cb_delmenu_goal(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    goal = db.get_goal(user_id)
+    if not goal:
+        if callback.message:
+            await callback.message.edit_text("No tienes una meta de ahorro definida.")
+        await callback.answer()
+        return
+
+    currency = db.get_currency(user_id)
+    aportado = db.get_goal_contributions_sum(user_id, goal["created_at"])
+    para = f" para \"{goal['label']}\"" if goal["label"] else ""
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="⚠️ Si, borrarla", callback_data="delgoal:confirm"),
+            InlineKeyboardButton(text="Cancelar", callback_data="delcancel"),
+        ]]
+    )
+    if callback.message:
+        await callback.message.edit_text(
+            f"¿Seguro que quieres borrar tu meta{para} de {goal['target_amount']:.2f} "
+            f"{currency} (llevas aportado {aportado:.2f} {currency})? Tambien se borra "
+            f"el historial de aportes.",
+            reply_markup=keyboard,
+        )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "delgoal:confirm")
+async def cb_delgoal_confirm(callback: CallbackQuery):
+    db.delete_goal_and_contributions(callback.from_user.id)
+    if callback.message:
+        await callback.message.edit_text("🗑️ Listo, borre tu meta de ahorro y tus aportes.")
+    await callback.answer("Meta borrada")
+
+
+@dp.callback_query(F.data == "delmenu:all")
+async def cb_delmenu_all(callback: CallbackQuery):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="⚠️ Si, borrar todo", callback_data="delall:confirm"),
+            InlineKeyboardButton(text="Cancelar", callback_data="delcancel"),
+        ]]
+    )
+    if callback.message:
+        await callback.message.edit_text(
+            "⚠️ Esto va a borrar TODOS tus registros, presupuestos y tu meta de "
+            "ahorro (y sus aportes). No se puede deshacer. Tu moneda e idioma "
+            "se mantienen.\n\n¿Seguro que quieres continuar?",
+            reply_markup=keyboard,
+        )
+    await callback.answer()
+
+
+@dp.message(Command("feedback", ignore_case=True))
 async def cmd_feedback(message: Message, command: CommandObject):
     db.ensure_user(message.from_user.id, message.from_user.username)
     if not command.args:
@@ -627,7 +845,7 @@ async def cmd_feedback(message: Message, command: CommandObject):
     await message.answer("Gracias, se lo hice llegar a quien mantiene el bot. 🙌")
 
 
-@dp.message(Command("admin"))
+@dp.message(Command("admin", ignore_case=True))
 async def cmd_admin(message: Message):
     if not ADMIN_TELEGRAM_ID or str(message.from_user.id) != str(ADMIN_TELEGRAM_ID):
         return  # comando oculto: no revela nada a quien no sea el admin
@@ -672,7 +890,7 @@ async def _check_goal_achievements(message: Message, user_id: int):
         await _award(message, user_id, "meta_cumplida")
 
 
-@dp.message(Command("logros"))
+@dp.message(Command("logros", ignore_case=True))
 async def cmd_achievements(message: Message):
     db.ensure_user(message.from_user.id, message.from_user.username)
     earned_codes = {row["code"] for row in db.get_achievements(message.from_user.id)}
@@ -687,7 +905,7 @@ async def cmd_achievements(message: Message):
     await message.answer("\n".join(lines))
 
 
-@dp.message(Command("mascota"))
+@dp.message(Command("mascota", ignore_case=True))
 async def cmd_pet(message: Message):
     db.ensure_user(message.from_user.id, message.from_user.username)
     mood = db.get_pet_mood(message.from_user.id)
@@ -774,7 +992,7 @@ def _confirm_keyboard(tx_id: int, kind: str) -> InlineKeyboardMarkup:
     )
 
 
-@dp.message(Command("reto"))
+@dp.message(Command("reto", ignore_case=True))
 async def cmd_challenge(message: Message):
     db.ensure_user(message.from_user.id, message.from_user.username)
     user_id = message.from_user.id

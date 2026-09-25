@@ -214,6 +214,18 @@ def get_transaction(transaction_id: int):
         ).fetchone()
 
 
+def get_last_transaction(user_id: int):
+    """Devuelve el ultimo registro del usuario sin borrarlo (o None si no hay)."""
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT id, kind, amount, category FROM transactions
+            WHERE user_id = ? ORDER BY id DESC LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+
+
 def delete_last_transaction(user_id: int):
     """Elimina el ultimo registro del usuario y lo devuelve (o None si no hay)."""
     with get_conn() as conn:
@@ -379,6 +391,25 @@ def get_goal(user_id: int):
             "SELECT target_amount, label, created_at FROM goals WHERE user_id = ?",
             (user_id,),
         ).fetchone()
+
+
+def delete_goal_and_contributions(user_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM goals WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM goal_contributions WHERE user_id = ?", (user_id,))
+
+
+def delete_budget(user_id: int, category: str):
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM budgets WHERE user_id = ? AND category = ?",
+            (user_id, category),
+        )
+
+
+def delete_all_budgets(user_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM budgets WHERE user_id = ?", (user_id,))
 
 
 # --- Aportes a la meta de ahorro --------------------------------------
