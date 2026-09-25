@@ -7,8 +7,9 @@ Comandos:
                          un dia, un rango o todo) y ver un resumen completo:
                          ingresos/gastos, presupuestos y meta de ahorro
   /categorias          - ve las categorias que se formaron segun tus registros
-  /presupuesto         - ver tus limites de gasto por categoria
-  /presupuesto X 200   - definir un limite mensual de 200 para la categoria X
+  /presupuesto         - ve tus limites de gasto y desde ahi crea, actualiza
+                         o borra un presupuesto (tambien acepta
+                         /presupuesto comida 200 directo)
   /meta                - menu para crear tu meta de ahorro o aportar a ella
                          (tambien acepta /meta 500 viaje a Cusco directo)
   /exportar            - descargar todo tu historial en un archivo Excel
@@ -80,9 +81,8 @@ WELCOME = (
     "todo) y te doy un resumen completo: ingresos/gastos, presupuestos y meta\n"
     "/moneda USD - 💱 define tu moneda (ej. PEN, USD, MXN, EUR)\n"
     "/categorias - 🏷️ ve las categorias que se formaron segun tus registros\n"
-    "/presupuesto comida 200 - 🎯 define un limite mensual para una categoria "
-    "(puede ser libre, ej. \"curso de gastronomia\")\n"
-    "/presupuesto - 📊 ver tus limites actuales\n"
+    "/presupuesto - 🎯 ve tus limites y desde ahi crea, actualiza o borra "
+    "uno (categoria libre, ej. \"curso de gastronomia\")\n"
     "/meta - 🐷 menu para crear tu meta de ahorro o aportar a ella\n"
     "/exportar - 📥 descarga todo tu historial en un archivo Excel\n"
     "/borrar - 🗑️ elige que borrar: tu ultimo registro, presupuestos, tu "
@@ -111,9 +111,8 @@ WELCOME_EN = (
     "all-time) and get a full report: income/expenses, budgets and your goal\n"
     "/moneda USD - 💱 set your currency (e.g. PEN, USD, MXN, EUR)\n"
     "/categorias - 🏷️ see the categories that formed from your own habits\n"
-    "/presupuesto comida 200 - 🎯 set a monthly limit for a category (can be "
-    "a free label, e.g. \"cooking course\")\n"
-    "/presupuesto - 📊 view your current limits\n"
+    "/presupuesto - 🎯 view your limits and from there create, update or "
+    "delete one (free category label, e.g. \"cooking course\")\n"
     "/meta - 🐷 menu to create your savings goal or contribute to it\n"
     "/exportar - 📥 download your full history as an Excel file\n"
     "/borrar - 🗑️ pick what to delete: your last entry, budgets, your "
@@ -136,7 +135,7 @@ BOT_COMMANDS = [
     BotCommand(command="resumen", description="Ver tu resumen (elige el periodo)"),
     BotCommand(command="moneda", description="Definir tu moneda"),
     BotCommand(command="categorias", description="Ver tus categorias segun tus habitos"),
-    BotCommand(command="presupuesto", description="Ver o definir limites mensuales"),
+    BotCommand(command="presupuesto", description="Ver, crear, actualizar o borrar presupuestos"),
     BotCommand(command="meta", description="Crear tu meta de ahorro o aportar a ella"),
     BotCommand(command="exportar", description="Descargar tu historial en Excel"),
     BotCommand(command="borrar", description="Elegir que borrar (registro, presupuestos, meta o todo)"),
@@ -190,6 +189,11 @@ PENDING_SUMMARY_INPUT: dict[int, str] = {}
 # menu de /meta y le toca escribir el monto (y, si es "crear", la
 # descripcion) en su proximo mensaje.
 PENDING_GOAL_INPUT: dict[int, str] = {}
+
+# user_id -> True: cuando el usuario eligio "Crear/actualizar presupuesto"
+# desde el menu de /presupuesto y le toca escribir "categoria monto" en su
+# proximo mensaje.
+PENDING_BUDGET_INPUT: dict[int, bool] = {}
 
 # codigo -> (emoji, titulo, descripcion)
 ACHIEVEMENTS = {
@@ -545,50 +549,30 @@ async def cmd_categories(message: Message):
     await message.answer("\n".join(lines))
 
 
-@dp.message(Command("presupuesto", ignore_case=True))
-async def cmd_budget(message: Message, command: CommandObject):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    currency = db.get_currency(message.from_user.id)
-
-    if not command.args:
-        budgets = db.get_budgets(message.from_user.id)
-        if not budgets:
-            await message.answer(
-                "No tienes presupuestos definidos todavia. Usa algo como "
-                "\"/presupuesto comida 200\" para poner un limite mensual."
-            )
-            return
-        lines = [f"Tus presupuestos mensuales ({currency}):"]
-        all_under_control = True
-        for row in budgets:
-            spent = db.get_month_spent(message.from_user.id, row["category"])
-            if spent > row["limit_amount"]:
-                all_under_control = False
-            lines.append(f"  - {row['category']}: {spent:.2f} / {row['limit_amount']:.2f}")
-        await message.answer("\n".join(lines))
-        if all_under_control:
-            await _award(message, message.from_user.id, "presupuesto_bajo_control")
-        return
-
-    parts = command.args.strip().rsplit(" ", 1)
+async def _process_budget_creation(message: Message, user_id: int, args_text: str) -> bool:
+    """Parsea "<categoria> <monto>" y crea/actualiza ese presupuesto.
+    Devuelve True si se guardo, False si hubo un error de formato (y ya se
+    le aviso)."""
+    currency = db.get_currency(user_id)
+    parts = args_text.strip().rsplit(" ", 1)
     if len(parts) != 2:
         await message.answer(
-            "Formato: /presupuesto categoria monto (ej. \"/presupuesto comida 200\" o "
-            "\"/presupuesto curso de gastronomia 8000\")."
+            "Formato: categoria monto (ej. \"comida 200\" o \"curso de "
+            "gastronomia 8000\")."
         )
-        return
+        return False
 
     category, raw_amount = parts[0].strip().lower(), parts[1].strip()
     if not category:
-        await message.answer("Falta el nombre de la categoria. Ejemplo: \"/presupuesto comida 200\".")
-        return
+        await message.answer("Falta el nombre de la categoria. Ejemplo: \"comida 200\".")
+        return False
     try:
         limit_amount = float(raw_amount.replace(",", "."))
     except ValueError:
-        await message.answer("El monto no es valido. Ejemplo: \"/presupuesto comida 200\".")
-        return
+        await message.answer("El monto no es valido. Ejemplo: \"comida 200\".")
+        return False
 
-    db.set_budget(message.from_user.id, category, limit_amount)
+    db.set_budget(user_id, category, limit_amount)
     note = ""
     if category not in VALID_CATEGORIES:
         note = (
@@ -600,6 +584,64 @@ async def cmd_budget(message: Message, command: CommandObject):
     await message.answer(
         f"Listo, tu limite mensual para \"{category}\" es {limit_amount:.2f} {currency}.{note}"
     )
+    return True
+
+
+@dp.message(Command("presupuesto", ignore_case=True))
+async def cmd_budget(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    db.ensure_user(user_id, message.from_user.username)
+    currency = db.get_currency(user_id)
+
+    if command.args:
+        # Atajo directo para quien ya se sabe el formato: /presupuesto comida 200.
+        await _process_budget_creation(message, user_id, command.args)
+        return
+
+    budgets = db.get_budgets(user_id)
+    if not budgets:
+        status_text = "No tienes presupuestos definidos todavia."
+    else:
+        lines = [f"Tus presupuestos mensuales ({currency}):"]
+        all_under_control = True
+        for row in budgets:
+            spent = db.get_month_spent(user_id, row["category"])
+            if spent > row["limit_amount"]:
+                all_under_control = False
+            lines.append(f"  - {row['category']}: {spent:.2f} / {row['limit_amount']:.2f}")
+        status_text = "\n".join(lines)
+        if all_under_control:
+            await _award(message, user_id, "presupuesto_bajo_control")
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="🎯 Crear/actualizar presupuesto", callback_data="presupuestomenu:crear"),
+            InlineKeyboardButton(text="🗑️ Borrar un presupuesto", callback_data="presupuestomenu:borrar"),
+        ]]
+    )
+    await message.answer(status_text, reply_markup=keyboard)
+
+
+@dp.callback_query(F.data.startswith("presupuestomenu:"))
+async def cb_presupuestomenu(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    choice = callback.data.split(":", 1)[1]
+
+    if choice == "crear":
+        PENDING_BUDGET_INPUT[user_id] = True
+        if callback.message:
+            await callback.message.edit_text(
+                "Escribe la categoria y el monto, ej. \"comida 200\" o "
+                "\"curso de gastronomia 8000\"."
+            )
+        await callback.answer()
+        return
+
+    if choice == "borrar":
+        await cb_delmenu_budgets(callback)
+        return
+
+    await callback.answer()
 
 
 async def _process_goal_creation(message: Message, user_id: int, args_text: str) -> bool:
@@ -1350,6 +1392,13 @@ async def handle_text(message: Message):
         await _send_full_report(
             message, user_id, start, end, f"del {d1.isoformat()} al {d2.isoformat()}"
         )
+        return
+
+    pending_budget = PENDING_BUDGET_INPUT.pop(user_id, None)
+    if pending_budget:
+        ok = await _process_budget_creation(message, user_id, message.text)
+        if not ok:
+            PENDING_BUDGET_INPUT[user_id] = True
         return
 
     pending_goal = PENDING_GOAL_INPUT.pop(user_id, None)
