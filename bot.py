@@ -145,7 +145,7 @@ BOT_COMMANDS = [
 
 VALID_CATEGORIES = [
     "comida", "transporte", "servicios", "salud",
-    "entretenimiento", "trabajo/negocio", "otros",
+    "entretenimiento", "trabajo/negocio", "ahorro", "otros",
 ]
 
 CATEGORY_LABELS = {
@@ -155,6 +155,7 @@ CATEGORY_LABELS = {
     "salud": "Salud",
     "entretenimiento": "Entretenimiento",
     "trabajo/negocio": "Trabajo/Negocio",
+    "ahorro": "Ahorro",
     "otros": "Otros",
 }
 
@@ -166,6 +167,7 @@ CATEGORY_COLORS = {
     "salud": "#eda100",
     "entretenimiento": "#e87ba4",
     "trabajo/negocio": "#008300",
+    "ahorro": "#0891b2",
     "otros": "#4a3aa7",
 }
 
@@ -684,16 +686,28 @@ async def _process_contribution(message: Message, user_id: int, amount_text: str
         return False
 
     db.add_goal_contribution(user_id, amount)
-    aportado = db.get_goal_contributions_sum(user_id, goal["created_at"])
     target = goal["target_amount"]
     label = goal["label"]
+
+    # El aporte tambien se registra como un gasto en "ahorro": asi el
+    # dinero que apartas para tu meta se resta de tu balance (ingresos -
+    # gastos), en vez de seguir apareciendo como disponible.
+    label_quoted = f' "{label}"' if label else ""
+    desc = f"aporte a la meta{label_quoted}"
+    db.add_transaction(user_id, "gasto", amount, "ahorro", desc)
+    db.adjust_pet_mood(user_id, 3)
+
+    aportado = db.get_goal_contributions_sum(user_id, goal["created_at"])
     pct = max(0, min(100, (aportado / target * 100) if target else 0))
     para = f" para \"{label}\"" if label else ""
     await message.answer(
-        f"💰 Aporte registrado: {amount:.2f} {currency}.\n"
+        f"💰 Aporte registrado: {amount:.2f} {currency} (tambien se anoto "
+        f"como gasto en \"ahorro\" para que se refleje en tu balance).\n"
         f"Llevas {aportado:.2f} / {target:.2f} {currency} ({pct:.0f}%){para}."
     )
     await _check_goal_achievements(message, user_id)
+    await _check_registro_achievements(message, user_id)
+    await _check_budget_alert(message, user_id, "ahorro")
     return True
 
 
