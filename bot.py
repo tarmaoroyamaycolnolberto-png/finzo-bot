@@ -19,8 +19,13 @@ Comandos:
   /mascota             - revisa el animo de Meow (tamagotchi financiero)
   /suscripcion         - ve tu estado (registros gratis restantes o tu
                          suscripcion activa) y suscribete con Telegram Stars
+  /recurrente          - menu para crear un gasto o ingreso que se registre
+                         solo cada mes (ej. alquiler, sueldo), o borrar uno
+  /deuda               - menu para anotar "me deben" o "yo debo", ver tus
+                         deudas pendientes y marcarlas como pagadas
   /feedback            - mandale un comentario o reporte a quien mantiene el bot
-  /idioma es|en        - elegir idioma (afecta el mensaje de bienvenida)
+  /idioma es|en        - elegir idioma (afecta el mensaje de bienvenida y
+                         las respuestas de /resumen y /presupuesto)
   /ayuda               - vuelve a mostrar las instrucciones
 
 Cualquier otro mensaje de texto se interpreta como un registro de gasto o
@@ -109,6 +114,10 @@ SORTEO_MIN_REGISTROS = 45
 SORTEO_PRIZE_USD = 50
 SORTEO_EXCLUSION_MONTHS = 2
 
+# Hora (Peru, UTC-5) a la que se revisan y aplican los gastos/ingresos
+# recurrentes que tocan ese dia.
+RECURRING_CHECK_HOUR = 8
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("finzo")
 
@@ -136,6 +145,10 @@ WELCOME = (
     "/mascota - 🐱 revisa el animo de Meow (sube si ahorras, baja si te pasas)\n"
     "/suscripcion - ⭐ revisa tus registros gratis restantes o tu suscripcion\n"
     "/sorteo - 🎟️ mira tu progreso hacia el sorteo mensual de $50\n"
+    "/recurrente - 🔁 crea un gasto o ingreso que se registre solo cada mes "
+    "(ej. alquiler, sueldo)\n"
+    "/deuda - 🤝 anota \"me deben\" o \"yo debo\", ve tus deudas pendientes y "
+    "marcalas como pagadas\n"
     "/feedback - 💬 mandame un comentario o reporte un problema\n"
     "/idioma en - 🌐 cambia el idioma (es/en)\n"
     "/ayuda - ❓ vuelve a mostrar este mensaje\n\n"
@@ -170,14 +183,16 @@ WELCOME_EN = (
     "/mascota - 🐱 check Meow's mood (goes up when you save, down when you overspend)\n"
     "/suscripcion - ⭐ check your free entries left or your subscription\n"
     "/sorteo - 🎟️ check your progress toward the monthly $50 giveaway\n"
+    "/recurrente - 🔁 set up an expense or income that gets logged "
+    "automatically every month (e.g. rent, salary)\n"
+    "/deuda - 🤝 track money owed to you or that you owe, see what's "
+    "pending and mark it as settled\n"
     "/feedback - 💬 send a comment or report a problem\n"
     "/idioma es - 🌐 switch language (es/en)\n"
     "/ayuda - ❓ show this message again\n\n"
     "🤖 The category for each entry is chosen by AI. That's why, after each "
     "one, I'll ask if it looks right; if not, I'll let you pick the correct "
-    "category or flip the type (expense/income) with buttons 👇.\n\n"
-    "(Note: some replies, like /resumen or /presupuesto, are still in "
-    "Spanish for now — full English support is on the way.)"
+    "category or flip the type (expense/income) with buttons 👇."
 )
 
 BOT_COMMANDS = [
@@ -193,6 +208,8 @@ BOT_COMMANDS = [
     BotCommand(command="mascota", description="Ver el animo de Meow"),
     BotCommand(command="suscripcion", description="Ver tus registros gratis o suscribirte"),
     BotCommand(command="sorteo", description="Ver tu progreso hacia el sorteo mensual de $50"),
+    BotCommand(command="recurrente", description="Gastos/ingresos que se registran solos cada mes"),
+    BotCommand(command="deuda", description="Anotar y ver deudas: me deben / yo debo"),
     BotCommand(command="feedback", description="Enviar un comentario o reportar un problema"),
     BotCommand(command="idioma", description="Cambiar idioma (es/en)"),
     BotCommand(command="ayuda", description="Ver los comandos disponibles"),
@@ -252,6 +269,21 @@ PENDING_BUDGET_INPUT: dict[int, bool] = {}
 # presupuesto desde la lista (predeterminadas + las suyas) y solo le falta
 # escribir el monto en su proximo mensaje.
 PENDING_BUDGET_AMOUNT: dict[int, str] = {}
+
+# user_id -> "gasto" o "ingreso": cuando el usuario eligio crear un gasto o
+# ingreso recurrente y le toca escribir "monto categoria descripcion" en su
+# proximo mensaje.
+PENDING_RECURRING_INPUT: dict[int, str] = {}
+
+# user_id -> "me_deben" o "yo_debo": cuando el usuario eligio anotar una
+# deuda nueva y le toca escribir "monto persona descripcion" en su proximo
+# mensaje.
+PENDING_DEBT_INPUT: dict[int, str] = {}
+
+
+def _t(lang: str, es: str, en: str) -> str:
+    """Devuelve el texto en el idioma del usuario (solo "es" o "en")."""
+    return en if lang == "en" else es
 
 # codigo -> (emoji, titulo, descripcion)
 ACHIEVEMENTS = {
@@ -397,7 +429,7 @@ def _parse_report_range(text: str):
     2026-09-24" o "2026-09-01 2026-09-24". Devuelve (fecha_inicio, fecha_fin)
     ya ordenadas, o None si no se pudieron leer ambas."""
     text = text.strip().lower()
-    for sep in (" al ", " a ", " hasta ", " - "):
+    for sep in (" al ", " a ", " hasta ", " to ", " - "):
         if sep in text:
             left, right = text.split(sep, 1)
             d1, d2 = _parse_report_date(left), _parse_report_date(right)
@@ -414,28 +446,47 @@ def _parse_report_range(text: str):
 async def _send_full_report(message: Message, user_id: int, start: dt.datetime | None, end: dt.datetime | None, label: str):
     """Arma y manda el resumen tipo articulo: ingresos/gastos/balance del
     periodo elegido, mas el estado actual de presupuestos y meta de ahorro
-    (esos dos son "estado actual", no dependen del periodo elegido)."""
+    (esos dos son "estado actual", no dependen del periodo elegido). `label`
+    ya viene en el idioma del usuario (lo arma quien llama a esta funcion)."""
     db.ensure_user(user_id, None)
+    lang = db.get_language(user_id)
     currency = db.get_currency(user_id)
-    start_iso = start.isoformat() if start else None
-    end_iso = end.isoformat() if end else None
+    # OJO: se compara contra created_at, que SQLite llena con CURRENT_TIMESTAMP
+    # en formato "AAAA-MM-DD HH:MM:SS" (separador espacio). Si aca usaramos
+    # .isoformat() (separador "T"), la comparacion de strings fallaria: " " <
+    # "T", asi que un created_at de HOY quedaria (mal) por debajo del limite
+    # de inicio. Por eso siempre .strftime con espacio para estos limites.
+    start_iso = start.strftime("%Y-%m-%d %H:%M:%S") if start else None
+    end_iso = end.strftime("%Y-%m-%d %H:%M:%S") if end else None
     summary = db.get_summary_range(user_id, start_iso, end_iso)
 
     ingresos = summary["total_ingresos"]
     gastos = summary["total_gastos"]
     balance = summary["balance"]
 
-    paragraphs = [f"📊 <b>Tu resumen — {html.escape(label)}</b>"]
+    paragraphs = [f"📊 <b>{_t(lang, 'Tu resumen', 'Your summary')} — {html.escape(label)}</b>"]
 
     if ingresos == 0 and gastos == 0:
-        paragraphs.append(f"No registraste nada en {label}. Escribeme algo como \"gaste 20 en el mercado\" para empezar.")
+        paragraphs.append(_t(
+            lang,
+            f"No registraste nada en {label}. Escribeme algo como \"gaste 20 en el mercado\" para empezar.",
+            f"You didn't log anything for {label}. Try telling me something like \"spent 20 on groceries\" to get started.",
+        ))
     else:
-        saldo_txt = "un balance positivo" if balance >= 0 else "un balance negativo"
-        p = (
-            f"Durante {label}, tus ingresos sumaron <b>{ingresos:.2f} {currency}</b> y "
-            f"tus gastos <b>{gastos:.2f} {currency}</b>, asi que te queda {saldo_txt} "
-            f"de <b>{balance:.2f} {currency}</b>."
-        )
+        if lang == "en":
+            saldo_txt = "a positive balance" if balance >= 0 else "a negative balance"
+            p = (
+                f"During {label}, your income added up to <b>{ingresos:.2f} {currency}</b> and "
+                f"your expenses <b>{gastos:.2f} {currency}</b>, leaving you with {saldo_txt} "
+                f"of <b>{balance:.2f} {currency}</b>."
+            )
+        else:
+            saldo_txt = "un balance positivo" if balance >= 0 else "un balance negativo"
+            p = (
+                f"Durante {label}, tus ingresos sumaron <b>{ingresos:.2f} {currency}</b> y "
+                f"tus gastos <b>{gastos:.2f} {currency}</b>, asi que te queda {saldo_txt} "
+                f"de <b>{balance:.2f} {currency}</b>."
+            )
         gastos_cat = summary["gastos_por_categoria"]
         if gastos_cat:
             top = sorted(gastos_cat, key=lambda r: r["total"], reverse=True)[:3]
@@ -443,26 +494,33 @@ async def _send_full_report(message: Message, user_id: int, start: dt.datetime |
             if len(frases) == 1:
                 detalle = frases[0]
             elif len(frases) == 2:
-                detalle = f"{frases[0]} y {frases[1]}"
+                detalle = f"{frases[0]} {_t(lang, 'y', 'and')} {frases[1]}"
             else:
-                detalle = f"{', '.join(frases[:-1])} y {frases[-1]}"
-            p += f" La mayor parte de tus gastos fue en {detalle}."
+                detalle = f"{', '.join(frases[:-1])} {_t(lang, 'y', 'and')} {frases[-1]}"
+            p += _t(
+                lang,
+                f" La mayor parte de tus gastos fue en {detalle}.",
+                f" Most of your spending was on {detalle}.",
+            )
             if len(gastos_cat) > 3:
-                p += " y otras categorias."
+                p += _t(lang, " y otras categorias.", " and other categories.")
         paragraphs.append(p)
 
     # --- Presupuestos: estado actual (siempre del mes en curso) ---
     budgets = db.get_budgets(user_id)
     if not budgets:
-        paragraphs.append(
+        paragraphs.append(_t(
+            lang,
             "<b>Presupuestos:</b> no tienes ninguno definido. Usa \"/presupuesto "
-            "comida 200\" para poner un limite mensual."
-        )
+            "comida 200\" para poner un limite mensual.",
+            "<b>Budgets:</b> you don't have any set up yet. Use \"/presupuesto "
+            "comida 200\" to set a monthly limit.",
+        ))
     else:
-        budget_lines = ["<b>Presupuestos de este mes:</b>"]
+        budget_lines = [_t(lang, "<b>Presupuestos de este mes:</b>", "<b>This month's budgets:</b>")]
         for row in budgets:
             spent = db.get_month_spent(user_id, row["category"])
-            estado = "⚠️ superado" if spent > row["limit_amount"] else "✅ bajo control"
+            estado = _t(lang, "⚠️ superado", "⚠️ over") if spent > row["limit_amount"] else _t(lang, "✅ bajo control", "✅ under control")
             budget_lines.append(
                 f"- {html.escape(row['category'])}: {spent:.2f} / {row['limit_amount']:.2f} "
                 f"{currency} ({estado})"
@@ -472,21 +530,35 @@ async def _send_full_report(message: Message, user_id: int, start: dt.datetime |
     # --- Meta de ahorro: estado actual ---
     goal = db.get_goal(user_id)
     if not goal:
-        paragraphs.append(
+        paragraphs.append(_t(
+            lang,
             "<b>Meta de ahorro:</b> no tienes ninguna activa. Usa \"/meta 500 viaje "
-            "a Cusco\" para definir una."
-        )
+            "a Cusco\" para definir una.",
+            "<b>Savings goal:</b> you don't have one active. Use \"/meta 500 trip "
+            "to Cusco\" to set one up.",
+        ))
     else:
         aportado = db.get_goal_contributions_sum(user_id, goal["created_at"])
         target = goal["target_amount"]
         pct = max(0, min(100, (aportado / target * 100) if target else 0))
-        para = f" para \"{html.escape(goal['label'])}\"" if goal["label"] else ""
-        paragraphs.append(
-            f"<b>Meta de ahorro{para}:</b> vas en el {pct:.0f}%, llevas aportado "
-            f"{aportado:.2f} de {target:.2f} {currency} (usa /meta para sumar)."
-        )
+        if lang == "en":
+            para = f" for \"{html.escape(goal['label'])}\"" if goal["label"] else ""
+            paragraphs.append(
+                f"<b>Savings goal{para}:</b> you're at {pct:.0f}%, you've put in "
+                f"{aportado:.2f} of {target:.2f} {currency} (use /meta to add more)."
+            )
+        else:
+            para = f" para \"{html.escape(goal['label'])}\"" if goal["label"] else ""
+            paragraphs.append(
+                f"<b>Meta de ahorro{para}:</b> vas en el {pct:.0f}%, llevas aportado "
+                f"{aportado:.2f} de {target:.2f} {currency} (usa /meta para sumar)."
+            )
 
-    paragraphs.append("🐱 Usa /presupuesto o /meta para actualizar cualquiera de estos.")
+    paragraphs.append(_t(
+        lang,
+        "🐱 Usa /presupuesto o /meta para actualizar cualquiera de estos.",
+        "🐱 Use /presupuesto or /meta to update either of these.",
+    ))
 
     await message.answer("\n\n".join(paragraphs), parse_mode="HTML")
 
@@ -494,7 +566,7 @@ async def _send_full_report(message: Message, user_id: int, start: dt.datetime |
         chart_buffer = _build_category_chart(summary["gastos_por_categoria"], currency)
         if chart_buffer:
             photo = BufferedInputFile(chart_buffer.read(), filename="resumen.png")
-            await message.answer_photo(photo, caption="📊 Gastos por categoria")
+            await message.answer_photo(photo, caption=_t(lang, "📊 Gastos por categoria", "📊 Spending by category"))
     except Exception as exc:
         logger.warning("No se pudo generar el grafico de resumen: %s", exc)
 
@@ -502,47 +574,52 @@ async def _send_full_report(message: Message, user_id: int, start: dt.datetime |
 @dp.message(Command("resumen", ignore_case=True))
 async def cmd_summary(message: Message):
     db.ensure_user(message.from_user.id, message.from_user.username)
+    lang = db.get_language(message.from_user.id)
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Hoy", callback_data="resumen:hoy"),
-                InlineKeyboardButton(text="Esta semana", callback_data="resumen:semana"),
+                InlineKeyboardButton(text=_t(lang, "Hoy", "Today"), callback_data="resumen:hoy"),
+                InlineKeyboardButton(text=_t(lang, "Esta semana", "This week"), callback_data="resumen:semana"),
             ],
             [
-                InlineKeyboardButton(text="Este mes", callback_data="resumen:mes"),
-                InlineKeyboardButton(text="Todo el historial", callback_data="resumen:todo"),
+                InlineKeyboardButton(text=_t(lang, "Este mes", "This month"), callback_data="resumen:mes"),
+                InlineKeyboardButton(text=_t(lang, "Todo el historial", "All-time"), callback_data="resumen:todo"),
             ],
             [
-                InlineKeyboardButton(text="📅 Un dia en particular", callback_data="resumen:dia"),
-                InlineKeyboardButton(text="📆 Un rango de fechas", callback_data="resumen:rango"),
+                InlineKeyboardButton(text=_t(lang, "📅 Un dia en particular", "📅 A specific day"), callback_data="resumen:dia"),
+                InlineKeyboardButton(text=_t(lang, "📆 Un rango de fechas", "📆 A date range"), callback_data="resumen:rango"),
             ],
-            [InlineKeyboardButton(text="Cancelar", callback_data="delcancel")],
+            [InlineKeyboardButton(text=_t(lang, "Cancelar", "Cancel"), callback_data="delcancel")],
         ]
     )
-    await message.answer("¿De que periodo quieres tu resumen?", reply_markup=keyboard)
+    await message.answer(_t(lang, "¿De que periodo quieres tu resumen?", "Which period do you want your summary for?"), reply_markup=keyboard)
 
 
 @dp.callback_query(F.data.startswith("resumen:"))
 async def cb_resumen_period(callback: CallbackQuery):
     user_id = callback.from_user.id
+    lang = db.get_language(user_id)
     choice = callback.data.split(":", 1)[1]
 
     if choice == "dia":
         PENDING_SUMMARY_INPUT[user_id] = "date"
         if callback.message:
-            await callback.message.edit_text(
-                "Escribeme la fecha que quieres ver, en formato AAAA-MM-DD "
-                "(ej. 2026-09-20)."
-            )
+            await callback.message.edit_text(_t(
+                lang,
+                "Escribeme la fecha que quieres ver, en formato AAAA-MM-DD (ej. 2026-09-20).",
+                "Tell me the date you want to see, in YYYY-MM-DD format (e.g. 2026-09-20).",
+            ))
         await callback.answer()
         return
 
     if choice == "rango":
         PENDING_SUMMARY_INPUT[user_id] = "range"
         if callback.message:
-            await callback.message.edit_text(
-                "Escribeme el rango de fechas, ej. \"2026-09-01 al 2026-09-24\"."
-            )
+            await callback.message.edit_text(_t(
+                lang,
+                "Escribeme el rango de fechas, ej. \"2026-09-01 al 2026-09-24\".",
+                "Tell me the date range, e.g. \"2026-09-01 to 2026-09-24\".",
+            ))
         await callback.answer()
         return
 
@@ -550,19 +627,19 @@ async def cb_resumen_period(callback: CallbackQuery):
     if choice == "hoy":
         start = dt.datetime(now.year, now.month, now.day)
         end = start + dt.timedelta(days=1)
-        label = f"hoy ({start.date().isoformat()})"
+        label = _t(lang, f"hoy ({start.date().isoformat()})", f"today ({start.date().isoformat()})")
     elif choice == "semana":
         start = now - dt.timedelta(days=7)
         end = None
-        label = "los ultimos 7 dias"
+        label = _t(lang, "los ultimos 7 dias", "the last 7 days")
     elif choice == "mes":
         start = dt.datetime(now.year, now.month, 1)
         end = None
-        label = "este mes"
+        label = _t(lang, "este mes", "this month")
     elif choice == "todo":
         start = None
         end = None
-        label = "todo tu historial"
+        label = _t(lang, "todo tu historial", "your entire history")
     else:
         await callback.answer()
         return
@@ -578,31 +655,38 @@ async def cmd_categories(message: Message):
     db.ensure_user(message.from_user.id, message.from_user.username)
     rows = db.get_categories_summary(message.from_user.id)
     currency = db.get_currency(message.from_user.id)
+    lang = db.get_language(message.from_user.id)
 
     if not rows:
-        await message.answer(
+        await message.answer(_t(
+            lang,
             "Todavia no tienes categorias propias: se van formando segun lo "
-            "que registres. Prueba escribiendo algo como \"gaste 20 en almuerzo\"."
-        )
+            "que registres. Prueba escribiendo algo como \"gaste 20 en almuerzo\".",
+            "You don't have any categories of your own yet: they form as you "
+            "log things. Try something like \"spent 20 on lunch\".",
+        ))
         return
 
     gastos = [r for r in rows if r["kind"] == "gasto"]
     ingresos = [r for r in rows if r["kind"] == "ingreso"]
 
-    lines = ["Estas son tus categorias, segun como has usado el bot:"]
+    lines = [_t(lang, "Estas son tus categorias, segun como has usado el bot:", "Here are your categories, based on how you've used the bot:")]
     if gastos:
-        lines.append("\nGastos:")
+        lines.append(_t(lang, "\nGastos:", "\nExpenses:"))
         for r in gastos:
-            lines.append(f"  - {r['category']}: {r['total']:.2f} {currency} ({r['n']} registros)")
+            lines.append(f"  - {r['category']}: {r['total']:.2f} {currency} ({r['n']} {_t(lang, 'registros', 'entries')})")
     if ingresos:
-        lines.append("\nIngresos:")
+        lines.append(_t(lang, "\nIngresos:", "\nIncome:"))
         for r in ingresos:
-            lines.append(f"  - {r['category']}: {r['total']:.2f} {currency} ({r['n']} registros)")
+            lines.append(f"  - {r['category']}: {r['total']:.2f} {currency} ({r['n']} {_t(lang, 'registros', 'entries')})")
 
-    lines.append(
+    lines.append(_t(
+        lang,
         "\nSi alguna vez te pregunto y marcas que una categoria no esta bien, "
-        "la corrijo y asi esta lista refleja mejor tus habitos reales."
-    )
+        "la corrijo y asi esta lista refleja mejor tus habitos reales.",
+        "\nIf I ever ask and you mark a category as wrong, I'll fix it so this "
+        "list better reflects your real habits.",
+    ))
     await message.answer("\n".join(lines))
 
 
@@ -626,6 +710,7 @@ def _category_list_rows(user_id: int, callback_data_for) -> list[list[InlineKeyb
 
 
 async def _save_budget(message: Message, user_id: int, category: str, limit_amount: float):
+    lang = db.get_language(user_id)
     currency = db.get_currency(user_id)
     db.set_budget(user_id, category, limit_amount)
     if category not in VALID_CATEGORIES:
@@ -633,38 +718,48 @@ async def _save_budget(message: Message, user_id: int, category: str, limit_amou
 
     note = ""
     if category not in VALID_CATEGORIES:
-        note = (
+        note = _t(
+            lang,
             "\n\nComo \"{}\" no es una de las categorias que uso para clasificar tus "
             "gastos automaticamente, este limite solo va a sumar los gastos que tu "
             "asignes manualmente a esa categoria. La agregue a tu lista de "
-            "categorias para que la veas junto a las demas la proxima vez."
+            "categorias para que la veas junto a las demas la proxima vez.",
+            "\n\nSince \"{}\" isn't one of the categories I use to classify your "
+            "expenses automatically, this limit will only add up expenses you "
+            "assign to it manually. I added it to your category list so you "
+            "see it alongside the rest next time.",
         ).format(category)
     label = CATEGORY_LABELS.get(category, category)
-    await message.answer(
-        f"Listo, tu limite mensual para \"{label}\" es {limit_amount:.2f} {currency}.{note}"
+    text = _t(
+        lang,
+        f"Listo, tu limite mensual para \"{label}\" es {limit_amount:.2f} {currency}.{note}",
+        f"Done, your monthly limit for \"{label}\" is {limit_amount:.2f} {currency}.{note}",
     )
+    await message.answer(text)
 
 
 async def _process_budget_creation(message: Message, user_id: int, args_text: str) -> bool:
     """Parsea "<categoria> <monto>" y crea/actualiza ese presupuesto.
     Devuelve True si se guardo, False si hubo un error de formato (y ya se
     le aviso)."""
+    lang = db.get_language(user_id)
     parts = args_text.strip().rsplit(" ", 1)
     if len(parts) != 2:
-        await message.answer(
-            "Formato: categoria monto (ej. \"comida 200\" o \"curso de "
-            "gastronomia 8000\")."
-        )
+        await message.answer(_t(
+            lang,
+            "Formato: categoria monto (ej. \"comida 200\" o \"curso de gastronomia 8000\").",
+            "Format: category amount (e.g. \"food 200\" or \"cooking course 8000\").",
+        ))
         return False
 
     category, raw_amount = parts[0].strip().lower(), parts[1].strip()
     if not category:
-        await message.answer("Falta el nombre de la categoria. Ejemplo: \"comida 200\".")
+        await message.answer(_t(lang, "Falta el nombre de la categoria. Ejemplo: \"comida 200\".", "Missing the category name. Example: \"food 200\"."))
         return False
     try:
         limit_amount = float(raw_amount.replace(",", "."))
     except ValueError:
-        await message.answer("El monto no es valido. Ejemplo: \"comida 200\".")
+        await message.answer(_t(lang, "El monto no es valido. Ejemplo: \"comida 200\".", "That amount isn't valid. Example: \"food 200\"."))
         return False
 
     await _save_budget(message, user_id, category, limit_amount)
@@ -674,13 +769,14 @@ async def _process_budget_creation(message: Message, user_id: int, args_text: st
 async def _process_budget_amount(message: Message, user_id: int, category: str, amount_text: str) -> bool:
     """Como _process_budget_creation, pero la categoria ya se eligio de la
     lista y solo falta parsear el monto que el usuario acaba de escribir."""
+    lang = db.get_language(user_id)
     try:
         limit_amount = float(amount_text.strip().split()[0].replace(",", "."))
     except (ValueError, IndexError):
-        await message.answer("Monto invalido. Ejemplo: 200")
+        await message.answer(_t(lang, "Monto invalido. Ejemplo: 200", "Invalid amount. Example: 200"))
         return False
     if limit_amount <= 0:
-        await message.answer("El monto debe ser mayor que cero.")
+        await message.answer(_t(lang, "El monto debe ser mayor que cero.", "The amount must be greater than zero."))
         return False
 
     await _save_budget(message, user_id, category, limit_amount)
@@ -691,6 +787,7 @@ async def _process_budget_amount(message: Message, user_id: int, category: str, 
 async def cmd_budget(message: Message, command: CommandObject):
     user_id = message.from_user.id
     db.ensure_user(user_id, message.from_user.username)
+    lang = db.get_language(user_id)
     currency = db.get_currency(user_id)
 
     if command.args:
@@ -700,9 +797,9 @@ async def cmd_budget(message: Message, command: CommandObject):
 
     budgets = db.get_budgets(user_id)
     if not budgets:
-        status_text = "No tienes presupuestos definidos todavia."
+        status_text = _t(lang, "No tienes presupuestos definidos todavia.", "You don't have any budgets set up yet.")
     else:
-        lines = [f"Tus presupuestos mensuales ({currency}):"]
+        lines = [_t(lang, f"Tus presupuestos mensuales ({currency}):", f"Your monthly budgets ({currency}):")]
         all_under_control = True
         for row in budgets:
             spent = db.get_month_spent(user_id, row["category"])
@@ -715,8 +812,8 @@ async def cmd_budget(message: Message, command: CommandObject):
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[[
-            InlineKeyboardButton(text="🎯 Crear/actualizar presupuesto", callback_data="presupuestomenu:crear"),
-            InlineKeyboardButton(text="🗑️ Borrar un presupuesto", callback_data="presupuestomenu:borrar"),
+            InlineKeyboardButton(text=_t(lang, "🎯 Crear/actualizar presupuesto", "🎯 Create/update a budget"), callback_data="presupuestomenu:crear"),
+            InlineKeyboardButton(text=_t(lang, "🗑️ Borrar un presupuesto", "🗑️ Delete a budget"), callback_data="presupuestomenu:borrar"),
         ]]
     )
     await message.answer(status_text, reply_markup=keyboard)
@@ -725,15 +822,16 @@ async def cmd_budget(message: Message, command: CommandObject):
 @dp.callback_query(F.data.startswith("presupuestomenu:"))
 async def cb_presupuestomenu(callback: CallbackQuery):
     user_id = callback.from_user.id
+    lang = db.get_language(user_id)
     choice = callback.data.split(":", 1)[1]
 
     if choice == "crear":
         rows = _category_list_rows(user_id, lambda c: f"presupuestocat:{c}")
-        rows.append([InlineKeyboardButton(text="✏️ Otra categoria", callback_data="presupuestocat:otra")])
+        rows.append([InlineKeyboardButton(text=_t(lang, "✏️ Otra categoria", "✏️ Another category"), callback_data="presupuestocat:otra")])
         keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
         if callback.message:
             await callback.message.edit_text(
-                "¿Para cual categoria quieres poner o actualizar un limite?",
+                _t(lang, "¿Para cual categoria quieres poner o actualizar un limite?", "Which category do you want to set or update a limit for?"),
                 reply_markup=keyboard,
             )
         await callback.answer()
@@ -749,23 +847,28 @@ async def cb_presupuestomenu(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("presupuestocat:"))
 async def cb_presupuestocat(callback: CallbackQuery):
     user_id = callback.from_user.id
+    lang = db.get_language(user_id)
     category = callback.data.split(":", 1)[1]
 
     if category == "otra":
         PENDING_BUDGET_INPUT[user_id] = True
         if callback.message:
-            await callback.message.edit_text(
-                "Escribe la categoria y el monto, ej. \"curso de gastronomia 8000\"."
-            )
+            await callback.message.edit_text(_t(
+                lang,
+                "Escribe la categoria y el monto, ej. \"curso de gastronomia 8000\".",
+                "Write the category and the amount, e.g. \"cooking course 8000\".",
+            ))
         await callback.answer()
         return
 
     PENDING_BUDGET_AMOUNT[user_id] = category
     if callback.message:
         label = CATEGORY_LABELS.get(category, category.capitalize())
-        await callback.message.edit_text(
-            f"¿Cual es el limite mensual para \"{label}\"? Escribe el monto, ej. 200."
-        )
+        await callback.message.edit_text(_t(
+            lang,
+            f"¿Cual es el limite mensual para \"{label}\"? Escribe el monto, ej. 200.",
+            f"What's the monthly limit for \"{label}\"? Write the amount, e.g. 200.",
+        ))
     await callback.answer()
 
 
@@ -1266,7 +1369,8 @@ async def cmd_admin(message: Message):
     active_subs = db.get_active_subscribers_count()
     total_payments = db.get_total_star_payments_count()
     total_stars = db.get_total_stars_revenue()
-    since_30d = (dt.datetime.utcnow() - dt.timedelta(days=30)).isoformat()
+    # Formato con espacio, no .isoformat(): ver el comentario en _send_full_report.
+    since_30d = (dt.datetime.utcnow() - dt.timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
     stars_30d = db.get_stars_revenue_since(since_30d)
 
     lines = [
@@ -1501,6 +1605,260 @@ async def cmd_sorteo(message: Message):
     )
 
 
+# --- Gastos/ingresos recurrentes ---
+
+def _recurring_list_text(user_id: int, lang: str) -> str:
+    rows = db.get_recurring(user_id)
+    currency = db.get_currency(user_id)
+    if not rows:
+        return _t(
+            lang,
+            "No tienes gastos ni ingresos recurrentes configurados todavia.",
+            "You don't have any recurring expenses or income set up yet.",
+        )
+    lines = [_t(lang, "Tus recurrentes (se registran solos cada mes):", "Your recurring items (logged automatically every month):")]
+    for r in rows:
+        etiqueta = r["label"] or r["category"]
+        tipo = _t(lang, "gasto", "expense") if r["kind"] == "gasto" else _t(lang, "ingreso", "income")
+        lines.append(
+            f"  - #{r['id']} {etiqueta}: {r['amount']:.2f} {currency} ({tipo}, "
+            f"{r['category']}, {_t(lang, 'dia', 'day')} {r['day_of_month']})"
+        )
+    return "\n".join(lines)
+
+
+@dp.message(Command("recurrente", ignore_case=True))
+async def cmd_recurring(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    db.ensure_user(user_id, message.from_user.username)
+    lang = db.get_language(user_id)
+
+    if command.args:
+        # Atajo directo: /recurrente 800 servicios alquiler (gasto, dia de hoy).
+        await _process_recurring_creation(message, user_id, "gasto", command.args)
+        return
+
+    text = _recurring_list_text(user_id, lang)
+    rows = []
+    for r in db.get_recurring(user_id):
+        etiqueta = r["label"] or r["category"]
+        rows.append([InlineKeyboardButton(
+            text=_t(lang, f"🗑️ Borrar \"{etiqueta}\"", f"🗑️ Delete \"{etiqueta}\""),
+            callback_data=f"recurdel:{r['id']}",
+        )])
+    rows.append([
+        InlineKeyboardButton(text=_t(lang, "➕ Gasto recurrente", "➕ Recurring expense"), callback_data="recurmenu:add_gasto"),
+        InlineKeyboardButton(text=_t(lang, "➕ Ingreso recurrente", "➕ Recurring income"), callback_data="recurmenu:add_ingreso"),
+    ])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+    await message.answer(text, reply_markup=keyboard)
+
+
+@dp.callback_query(F.data.startswith("recurmenu:"))
+async def cb_recurmenu(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    lang = db.get_language(user_id)
+    choice = callback.data.split(":", 1)[1]
+
+    if choice in ("add_gasto", "add_ingreso"):
+        kind = "gasto" if choice == "add_gasto" else "ingreso"
+        PENDING_RECURRING_INPUT[user_id] = kind
+        today = (dt.datetime.utcnow() + dt.timedelta(hours=PERU_UTC_OFFSET)).day
+        if callback.message:
+            await callback.message.edit_text(_t(
+                lang,
+                f"Escribe: monto categoria descripcion (ej. \"800 servicios alquiler\"). "
+                f"Se va a registrar solo, cada mes, el dia {today} (hoy).",
+                f"Write: amount category description (e.g. \"800 utilities rent\"). "
+                f"It will be logged automatically every month on day {today} (today).",
+            ))
+        await callback.answer()
+        return
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("recurdel:"))
+async def cb_recurdel(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    lang = db.get_language(user_id)
+    recurring_id = int(callback.data.split(":", 1)[1])
+    deleted = db.deactivate_recurring(recurring_id, user_id)
+    if callback.message:
+        if deleted:
+            await callback.message.edit_text(_t(lang, "Listo, lo borre. Ya no se va a registrar solo.", "Done, deleted. It won't be logged automatically anymore."))
+        else:
+            await callback.message.edit_text(_t(lang, "Ese recurrente ya no existe.", "That recurring item no longer exists."))
+    await callback.answer()
+
+
+async def _process_recurring_creation(message: Message, user_id: int, kind: str, args_text: str) -> bool:
+    """Parsea "<monto> <categoria> [descripcion]" y crea el recurrente, con
+    el dia de hoy (hora de Peru) como el dia del mes en que se va a repetir.
+    Devuelve True si se guardo, False si hubo un error de formato (y ya se
+    le aviso)."""
+    lang = db.get_language(user_id)
+    parts = args_text.strip().split(maxsplit=2)
+    if len(parts) < 2:
+        await message.answer(_t(
+            lang,
+            "Formato: monto categoria descripcion (ej. \"800 servicios alquiler\").",
+            "Format: amount category description (e.g. \"800 utilities rent\").",
+        ))
+        return False
+
+    raw_amount, category = parts[0], parts[1].strip().lower()
+    label = parts[2].strip() if len(parts) > 2 else category
+    try:
+        amount = float(raw_amount.replace(",", "."))
+    except ValueError:
+        await message.answer(_t(
+            lang,
+            "El monto no es valido. Ejemplo: \"800 servicios alquiler\".",
+            "That amount isn't valid. Example: \"800 utilities rent\".",
+        ))
+        return False
+    if amount <= 0:
+        await message.answer(_t(lang, "El monto debe ser mayor que cero.", "The amount must be greater than zero."))
+        return False
+
+    if category not in VALID_CATEGORIES:
+        db.add_custom_category(user_id, category)
+
+    today = (dt.datetime.utcnow() + dt.timedelta(hours=PERU_UTC_OFFSET)).day
+    db.add_recurring(user_id, kind, amount, category, label, today)
+    currency = db.get_currency(user_id)
+    tipo = _t(lang, "gasto", "expense") if kind == "gasto" else _t(lang, "ingreso", "income")
+    await message.answer(_t(
+        lang,
+        f"Listo, cree tu {tipo} recurrente \"{label}\" de {amount:.2f} {currency}. "
+        f"Se va a registrar solo cada mes, el dia {today}. Usa /recurrente para verlo o borrarlo.",
+        f"Done, I created your recurring {tipo} \"{label}\" of {amount:.2f} {currency}. "
+        f"It'll be logged automatically every month on day {today}. Use /recurrente to view or delete it.",
+    ))
+    return True
+
+
+# --- Registro de deudas (me deben / yo debo) ---
+
+def _debts_summary_text(user_id: int, lang: str) -> str:
+    totals = db.get_debts_totals(user_id)
+    currency = db.get_currency(user_id)
+    pending = db.get_pending_debts(user_id)
+
+    lines = [_t(
+        lang,
+        f"Te deben en total: {totals['me_deben']:.2f} {currency}\nDebes en total: {totals['yo_debo']:.2f} {currency}",
+        f"Owed to you: {totals['me_deben']:.2f} {currency}\nYou owe: {totals['yo_debo']:.2f} {currency}",
+    )]
+
+    if pending:
+        lines.append("")
+        lines.append(_t(lang, "Deudas pendientes:", "Pending debts:"))
+        for d in pending:
+            direccion = _t(lang, "me debe", "owes me") if d["direction"] == "me_deben" else _t(lang, "le debo", "I owe")
+            desc = f" ({d['description']})" if d["description"] else ""
+            lines.append(f"  - #{d['id']} {d['person']} {direccion} {d['amount']:.2f} {currency}{desc}")
+    else:
+        lines.append("")
+        lines.append(_t(lang, "No tienes deudas pendientes.", "You don't have any pending debts."))
+
+    return "\n".join(lines)
+
+
+@dp.message(Command("deuda", ignore_case=True))
+async def cmd_debt(message: Message):
+    user_id = message.from_user.id
+    db.ensure_user(user_id, message.from_user.username)
+    lang = db.get_language(user_id)
+
+    text = _debts_summary_text(user_id, lang)
+    rows = []
+    for d in db.get_pending_debts(user_id):
+        rows.append([InlineKeyboardButton(
+            text=_t(lang, f"✅ Marcar pagada #{d['id']} ({d['person']})", f"✅ Mark #{d['id']} settled ({d['person']})"),
+            callback_data=f"deudapagar:{d['id']}",
+        )])
+    rows.append([
+        InlineKeyboardButton(text=_t(lang, "➕ Me deben", "➕ Owed to me"), callback_data="deudatipo:me_deben"),
+        InlineKeyboardButton(text=_t(lang, "➕ Yo debo", "➕ I owe"), callback_data="deudatipo:yo_debo"),
+    ])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+    await message.answer(text, reply_markup=keyboard)
+
+
+@dp.callback_query(F.data.startswith("deudatipo:"))
+async def cb_deudatipo(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    lang = db.get_language(user_id)
+    direction = callback.data.split(":", 1)[1]
+    PENDING_DEBT_INPUT[user_id] = direction
+    if callback.message:
+        await callback.message.edit_text(_t(
+            lang,
+            "Escribe: monto persona descripcion (ej. \"50 Juan almuerzo\"). "
+            "La descripcion es opcional.",
+            "Write: amount person description (e.g. \"50 John lunch\"). "
+            "The description is optional.",
+        ))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("deudapagar:"))
+async def cb_deudapagar(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    lang = db.get_language(user_id)
+    debt_id = int(callback.data.split(":", 1)[1])
+    updated = db.mark_debt_paid(debt_id, user_id)
+    if callback.message:
+        if updated:
+            await callback.message.edit_text(_t(lang, "Listo, la marque como pagada.", "Done, marked as settled."))
+        else:
+            await callback.message.edit_text(_t(lang, "Esa deuda ya no esta pendiente.", "That debt is no longer pending."))
+    await callback.answer()
+
+
+async def _process_debt_creation(message: Message, user_id: int, direction: str, args_text: str) -> bool:
+    """Parsea "<monto> <persona> [descripcion]" y anota la deuda. Devuelve
+    True si se guardo, False si hubo un error de formato (y ya se le aviso)."""
+    lang = db.get_language(user_id)
+    parts = args_text.strip().split(maxsplit=2)
+    if len(parts) < 2:
+        await message.answer(_t(
+            lang,
+            "Formato: monto persona descripcion (ej. \"50 Juan almuerzo\").",
+            "Format: amount person description (e.g. \"50 John lunch\").",
+        ))
+        return False
+
+    raw_amount, person = parts[0], parts[1].strip()
+    description = parts[2].strip() if len(parts) > 2 else ""
+    try:
+        amount = float(raw_amount.replace(",", "."))
+    except ValueError:
+        await message.answer(_t(lang, "El monto no es valido. Ejemplo: \"50 Juan almuerzo\".", "That amount isn't valid. Example: \"50 John lunch\"."))
+        return False
+    if amount <= 0:
+        await message.answer(_t(lang, "El monto debe ser mayor que cero.", "The amount must be greater than zero."))
+        return False
+
+    db.add_debt(user_id, direction, person, amount, description)
+    currency = db.get_currency(user_id)
+    if direction == "me_deben":
+        await message.answer(_t(
+            lang,
+            f"Listo, anote que {person} te debe {amount:.2f} {currency}. Usa /deuda para verlo o marcarlo pagado.",
+            f"Done, noted that {person} owes you {amount:.2f} {currency}. Use /deuda to view or mark it settled.",
+        ))
+    else:
+        await message.answer(_t(
+            lang,
+            f"Listo, anote que le debes {amount:.2f} {currency} a {person}. Usa /deuda para verlo o marcarlo pagado.",
+            f"Done, noted that you owe {person} {amount:.2f} {currency}. Use /deuda to view or mark it settled.",
+        ))
+    return True
+
+
 @dp.callback_query(F.data == "premium:subscribe")
 async def cb_premium_subscribe(callback: CallbackQuery):
     link = await callback.bot.create_invoice_link(
@@ -1621,35 +1979,40 @@ async def handle_text(message: Message):
     db.ensure_user(message.from_user.id, message.from_user.username)
     user_id = message.from_user.id
 
+    lang = db.get_language(user_id)
+
     pending_summary = PENDING_SUMMARY_INPUT.pop(user_id, None)
     if pending_summary == "date":
         parsed = _parse_report_date(message.text)
         if not parsed:
-            await message.answer(
-                "No pude leer esa fecha. Escribela como AAAA-MM-DD, ej. 2026-09-20."
-            )
+            await message.answer(_t(
+                lang,
+                "No pude leer esa fecha. Escribela como AAAA-MM-DD, ej. 2026-09-20.",
+                "I couldn't read that date. Write it as YYYY-MM-DD, e.g. 2026-09-20.",
+            ))
             PENDING_SUMMARY_INPUT[user_id] = "date"
             return
         start = dt.datetime(parsed.year, parsed.month, parsed.day)
         end = start + dt.timedelta(days=1)
-        await _send_full_report(message, user_id, start, end, f"el {parsed.isoformat()}")
+        label = _t(lang, f"el {parsed.isoformat()}", f"{parsed.isoformat()}")
+        await _send_full_report(message, user_id, start, end, label)
         return
 
     if pending_summary == "range":
         parsed = _parse_report_range(message.text)
         if not parsed:
-            await message.answer(
-                "No pude leer ese rango. Escribelo como \"2026-09-01 al "
-                "2026-09-24\"."
-            )
+            await message.answer(_t(
+                lang,
+                "No pude leer ese rango. Escribelo como \"2026-09-01 al 2026-09-24\".",
+                "I couldn't read that range. Write it as \"2026-09-01 to 2026-09-24\".",
+            ))
             PENDING_SUMMARY_INPUT[user_id] = "range"
             return
         d1, d2 = parsed
         start = dt.datetime(d1.year, d1.month, d1.day)
         end = dt.datetime(d2.year, d2.month, d2.day) + dt.timedelta(days=1)
-        await _send_full_report(
-            message, user_id, start, end, f"del {d1.isoformat()} al {d2.isoformat()}"
-        )
+        label = _t(lang, f"del {d1.isoformat()} al {d2.isoformat()}", f"{d1.isoformat()} to {d2.isoformat()}")
+        await _send_full_report(message, user_id, start, end, label)
         return
 
     pending_budget = PENDING_BUDGET_INPUT.pop(user_id, None)
@@ -1698,6 +2061,20 @@ async def handle_text(message: Message):
         budgets = {b["category"]: b["limit_amount"] for b in db.get_budgets(user_id)}
         if category in budgets:
             await _check_budget_alert(message, user_id, category)
+        return
+
+    pending_recurring = PENDING_RECURRING_INPUT.pop(user_id, None)
+    if pending_recurring is not None:
+        ok = await _process_recurring_creation(message, user_id, pending_recurring, message.text)
+        if not ok:
+            PENDING_RECURRING_INPUT[user_id] = pending_recurring
+        return
+
+    pending_debt = PENDING_DEBT_INPUT.pop(user_id, None)
+    if pending_debt is not None:
+        ok = await _process_debt_creation(message, user_id, pending_debt, message.text)
+        if not ok:
+            PENDING_DEBT_INPUT[user_id] = pending_debt
         return
 
     today = dt.datetime.utcnow().date().isoformat()
@@ -1966,6 +2343,58 @@ async def monthly_sorteo_task(bot: Bot):
             await asyncio.sleep(3600)
 
 
+def _seconds_until_next_daily_check() -> float:
+    """Todos los dias a las RECURRING_CHECK_HOUR (hora de Peru), para aplicar
+    los gastos/ingresos recurrentes que le tocan a cada usuario ese dia."""
+    now_utc = dt.datetime.utcnow()
+    peru_now = now_utc + dt.timedelta(hours=PERU_UTC_OFFSET)
+    target_peru = peru_now.replace(hour=RECURRING_CHECK_HOUR, minute=0, second=0, microsecond=0)
+    if target_peru <= peru_now:
+        target_peru += dt.timedelta(days=1)
+    target_utc = target_peru - dt.timedelta(hours=PERU_UTC_OFFSET)
+    return max((target_utc - now_utc).total_seconds(), 60)
+
+
+async def _apply_due_recurring(bot: Bot):
+    """Registra automaticamente cada gasto/ingreso recurrente que le toca al
+    dia de hoy (hora de Peru) y todavia no se aplico este mes."""
+    now_utc = dt.datetime.utcnow()
+    peru_now = now_utc + dt.timedelta(hours=PERU_UTC_OFFSET)
+    month_key = f"{peru_now.year:04d}-{peru_now.month:02d}"
+    last_day = calendar.monthrange(peru_now.year, peru_now.month)[1]
+
+    for rule in db.get_due_recurring(peru_now.day, last_day, month_key):
+        db.add_transaction(
+            rule["user_id"], rule["kind"], rule["amount"], rule["category"],
+            f"[recurrente] {rule['label'] or rule['category']}",
+        )
+        db.set_recurring_last_run(rule["id"], month_key)
+        try:
+            lang = db.get_language(rule["user_id"])
+            currency = db.get_currency(rule["user_id"])
+            etiqueta = rule["label"] or rule["category"]
+            tipo = _t(lang, "gasto", "expense") if rule["kind"] == "gasto" else _t(lang, "ingreso", "income")
+            await bot.send_message(rule["user_id"], _t(
+                lang,
+                f"🔁 Registre tu {tipo} recurrente \"{etiqueta}\" de {rule['amount']:.2f} {currency}.",
+                f"🔁 Logged your recurring {tipo} \"{etiqueta}\" of {rule['amount']:.2f} {currency}.",
+            ))
+        except Exception as exc:
+            logger.warning("No se pudo avisar el recurrente %s al usuario %s: %s", rule["id"], rule["user_id"], exc)
+
+
+async def recurring_task(bot: Bot):
+    """Cada dia, a la hora fijada, aplica los gastos/ingresos recurrentes que
+    correspondan (ver _apply_due_recurring)."""
+    while True:
+        try:
+            await asyncio.sleep(_seconds_until_next_daily_check())
+            await _apply_due_recurring(bot)
+        except Exception as exc:
+            logger.warning("Fallo el ciclo de recurrentes, reintento en 1 hora: %s", exc)
+            await asyncio.sleep(3600)
+
+
 BOT_DESCRIPTION = (
     "🐾 ¡Hola! Soy Meow 💰✨ Te ayudo a controlar tus finanzas personales sin "
     "hojas de calculo ni apps complicadas. Solo cuentame que gastaste o "
@@ -1991,6 +2420,7 @@ async def main():
         logger.warning("No se pudo actualizar la descripcion del bot: %s", exc)
     asyncio.create_task(weekly_summary_task(bot))
     asyncio.create_task(monthly_sorteo_task(bot))
+    asyncio.create_task(recurring_task(bot))
     logger.info("Finzo esta corriendo...")
     await dp.start_polling(bot)
 

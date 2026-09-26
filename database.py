@@ -147,6 +147,36 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recurring (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,           -- 'gasto' o 'ingreso'
+                amount REAL NOT NULL,
+                category TEXT NOT NULL,
+                label TEXT,
+                day_of_month INTEGER NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                last_run_month TEXT,          -- month_key ("YYYY-MM") de la ultima vez que se aplico
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS debts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                direction TEXT NOT NULL,      -- 'me_deben' o 'yo_debo'
+                person TEXT NOT NULL,
+                amount REAL NOT NULL,
+                description TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                paid_at TEXT
+            )
+            """
+        )
         # Migraciones suaves: agregan columnas nuevas si la base de datos
         # viene de una version anterior que no las tenia.
         for statement in (
@@ -293,7 +323,10 @@ def get_categories_summary(user_id: int):
 def get_summary(user_id: int, period: str = "semana"):
     """period: 'semana' o 'mes'. Devuelve totales y desglose por categoria."""
     days = 7 if period == "semana" else 30
-    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    # Formato con espacio (no .isoformat(), que usa "T"): created_at viene de
+    # CURRENT_TIMESTAMP de SQLite en formato "AAAA-MM-DD HH:MM:SS", y comparar
+    # contra un string con "T" rompe la comparacion (" " < "T").
+    since = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
 
     with get_conn() as conn:
         rows = conn.execute(
@@ -378,7 +411,8 @@ def get_budgets(user_id: int):
 def get_month_spent(user_id: int, category: str) -> float:
     """Total gastado en una categoria desde el dia 1 del mes actual (UTC)."""
     now = datetime.utcnow()
-    start_of_month = datetime(now.year, now.month, 1).isoformat()
+    # Formato con espacio, no .isoformat(): ver el comentario en get_summary.
+    start_of_month = datetime(now.year, now.month, 1).strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as conn:
         row = conn.execute(
             """
@@ -847,5 +881,135 @@ def get_registro_count_since_win(user_id: int, since_iso: str) -> int:
             (user_id, since_iso),
         ).fetchone()
         return row["n"]
+
+
+# --- Gastos/ingresos recurrentes ---
+
+def add_recurring(user_id: int, kind: str, amount: float, category: str, label: str, day_of_month: int) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO recurring (user_id, kind, amount, category, label, day_of_month)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, kind, amount, category, label, day_of_month),
+        )
+        return cur.lastrowid
+
+
+def get_recurring(user_id: int):
+    """Las reglas recurrentes activas de este usuario, mas nuevas primero."""
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT id, kind, amount, category, label, day_of_month FROM recurring
+            WHERE user_id = ? AND active = 1
+            ORDER BY id DESC
+            """,
+            (user_id,),
+        ).fetchall()
+
+
+def get_recurring_by_id(recurring_id: int):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM recurring WHERE id = ?", (recurring_id,)
+        ).fetchone()
+
+
+def deactivate_recurring(recurring_id: int, user_id: int) -> bool:
+    """Desactiva una regla recurrente (no se vuelve a aplicar). Verifica que
+    sea del usuario que la pide borrar. Devuelve True si se borro algo."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE recurring SET active = 0 WHERE id = ? AND user_id = ? AND active = 1",
+            (recurring_id, user_id),
+        )
+        return cur.rowcount > 0
+
+
+def set_recurring_last_run(recurring_id: int, month_key: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE recurring SET last_run_month = ? WHERE id = ?",
+            (month_key, recurring_id),
+        )
+
+
+def get_due_recurring(today: int, last_day_of_month: int, month_key: str):
+    """Reglas activas que tocan hoy: su dia programado (recortado al ultimo
+    dia del mes si el mes es mas corto, ej. el 31 cae el 28/29/30 en meses
+    cortos) coincide con el dia de hoy, y todavia no se aplicaron este mes."""
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT id, user_id, kind, amount, category, label FROM recurring
+            WHERE active = 1
+              AND (last_run_month IS NULL OR last_run_month != ?)
+              AND MIN(day_of_month, ?) = ?
+            """,
+            (month_key, last_day_of_month, today),
+        ).fetchall()
+
+
+# --- Registro de deudas (me deben / yo debo) ---
+
+def add_debt(user_id: int, direction: str, person: str, amount: float, description: str) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO debts (user_id, direction, person, amount, description)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, direction, person, amount, description),
+        )
+        return cur.lastrowid
+
+
+def get_pending_debts(user_id: int):
+    """Deudas sin marcar como pagadas, mas nuevas primero."""
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT id, direction, person, amount, description FROM debts
+            WHERE user_id = ? AND paid_at IS NULL
+            ORDER BY id DESC
+            """,
+            (user_id,),
+        ).fetchall()
+
+
+def get_debt(debt_id: int):
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM debts WHERE id = ?", (debt_id,)).fetchone()
+
+
+def mark_debt_paid(debt_id: int, user_id: int) -> bool:
+    """Marca una deuda como pagada/cobrada. Verifica que sea del usuario que
+    lo pide. Devuelve True si se actualizo algo."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE debts SET paid_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? AND paid_at IS NULL",
+            (debt_id, user_id),
+        )
+        return cur.rowcount > 0
+
+
+def get_debts_totals(user_id: int) -> dict:
+    """Suma de deudas pendientes por direccion: cuanto le deben al usuario y
+    cuanto debe el usuario."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT direction, COALESCE(SUM(amount), 0) as total FROM debts
+            WHERE user_id = ? AND paid_at IS NULL
+            GROUP BY direction
+            """,
+            (user_id,),
+        ).fetchall()
+        totals = {"me_deben": 0.0, "yo_debo": 0.0}
+        for r in rows:
+            totals[r["direction"]] = r["total"]
+        return totals
 
 
