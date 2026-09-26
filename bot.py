@@ -1430,6 +1430,38 @@ async def cmd_subscription(message: Message):
     )
 
 
+@dp.message(Command("sorteo", ignore_case=True))
+async def cmd_sorteo(message: Message):
+    user_id = message.from_user.id
+    db.ensure_user(user_id, message.from_user.username)
+
+    now_utc = dt.datetime.utcnow()
+    peru_now = now_utc + dt.timedelta(hours=PERU_UTC_OFFSET)
+    start_of_month_peru = dt.datetime(peru_now.year, peru_now.month, 1)
+    start_of_month_utc = start_of_month_peru - dt.timedelta(hours=PERU_UTC_OFFSET)
+    count = db.get_registro_count_since(user_id, start_of_month_utc.strftime("%Y-%m-%d %H:%M:%S"))
+    restantes = max(0, SORTEO_MIN_REGISTROS - count)
+
+    if count >= SORTEO_MIN_REGISTROS:
+        progreso = f"✅ Ya llevas {count} registros este mes: estas participando en el sorteo."
+    else:
+        progreso = (
+            f"Llevas {count}/{SORTEO_MIN_REGISTROS} registros este mes "
+            f"(te faltan {restantes} para entrar al sorteo)."
+        )
+
+    await message.answer(
+        f"🎟️ Sorteo mensual de Meow\n\n"
+        f"Cada mes sorteamos ${SORTEO_PRIZE_USD:.0f} entre quienes registren al menos "
+        f"{SORTEO_MIN_REGISTROS} movimientos (gastos o ingresos) ese mes. No hace "
+        "falta pagar nada ni estar suscrito, solo usar el bot con regularidad.\n\n"
+        f"{progreso}\n\n"
+        "El sorteo se hace automaticamente el primer dia de cada mes, entre "
+        "quienes cumplieron el mes anterior. Si ganas, te contactamos para "
+        "coordinar el premio."
+    )
+
+
 @dp.callback_query(F.data == "premium:subscribe")
 async def cb_premium_subscribe(callback: CallbackQuery):
     link = await callback.bot.create_invoice_link(
@@ -1873,38 +1905,6 @@ async def monthly_sorteo_task(bot: Bot):
         except Exception as exc:
             logger.warning("Fallo el ciclo del sorteo mensual, reintento en 1 hora: %s", exc)
             await asyncio.sleep(3600)
-
-
-@dp.message(Command("sorteo", ignore_case=True))
-async def cmd_sorteo(message: Message):
-    user_id = message.from_user.id
-    db.ensure_user(user_id, message.from_user.username)
-
-    now_utc = dt.datetime.utcnow()
-    peru_now = now_utc + dt.timedelta(hours=PERU_UTC_OFFSET)
-    start_of_month_peru = dt.datetime(peru_now.year, peru_now.month, 1)
-    start_of_month_utc = start_of_month_peru - dt.timedelta(hours=PERU_UTC_OFFSET)
-    count = db.get_registro_count_since(user_id, start_of_month_utc.strftime("%Y-%m-%d %H:%M:%S"))
-    restantes = max(0, SORTEO_MIN_REGISTROS - count)
-
-    if count >= SORTEO_MIN_REGISTROS:
-        progreso = f"✅ Ya llevas {count} registros este mes: estas participando en el sorteo."
-    else:
-        progreso = (
-            f"Llevas {count}/{SORTEO_MIN_REGISTROS} registros este mes "
-            f"(te faltan {restantes} para entrar al sorteo)."
-        )
-
-    await message.answer(
-        f"🎟️ Sorteo mensual de Meow\n\n"
-        f"Cada mes sorteamos ${SORTEO_PRIZE_USD:.0f} entre quienes registren al menos "
-        f"{SORTEO_MIN_REGISTROS} movimientos (gastos o ingresos) ese mes. No hace "
-        "falta pagar nada ni estar suscrito, solo usar el bot con regularidad.\n\n"
-        f"{progreso}\n\n"
-        "El sorteo se hace automaticamente el primer dia de cada mes, entre "
-        "quienes cumplieron el mes anterior. Si ganas, te contactamos para "
-        "coordinar el premio."
-    )
 
 
 BOT_DESCRIPTION = (
