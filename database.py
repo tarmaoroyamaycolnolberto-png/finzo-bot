@@ -818,3 +818,34 @@ def get_last_win_month(user_id: int) -> str | None:
         return row["month_key"] if row else None
 
 
+def get_last_win_timestamps() -> dict[int, str]:
+    """Para cada usuario que alguna vez gano el sorteo, la fecha (ran_at) de
+    su victoria mas reciente. Se usa para reiniciar su conteo de registros
+    despues de ganar -- vuelve a necesitar SORTEO_MIN_REGISTROS registros
+    NUEVOS (hechos despues de esa fecha) para participar otra vez, no le
+    alcanza con el total historico que ya tenia antes de ganar."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT winner_user_id, MAX(ran_at) as last_win
+            FROM sorteo_runs
+            WHERE winner_user_id IS NOT NULL
+            GROUP BY winner_user_id
+            """
+        ).fetchall()
+        return {r["winner_user_id"]: r["last_win"] for r in rows}
+
+
+def get_registro_count_since_win(user_id: int, since_iso: str) -> int:
+    """Cuantos registros ha hecho este usuario DESPUES de una fecha dada
+    (su ultima victoria en el sorteo) -- ambas columnas usan el mismo
+    formato de CURRENT_TIMESTAMP de SQLite, asi que la comparacion de
+    strings es directa."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as n FROM transactions WHERE user_id = ? AND created_at > ?",
+            (user_id, since_iso),
+        ).fetchone()
+        return row["n"]
+
+
