@@ -695,6 +695,18 @@ def get_custom_categories(user_id: int):
         return [r["category"] for r in rows]
 
 
+def delete_custom_category(user_id: int, category: str) -> bool:
+    """Quita una categoria propia de la lista de sugerencias (no toca los
+    registros ni presupuestos que ya la usan, solo deja de aparecer para
+    elegirla de nuevo). Devuelve True si habia algo que borrar."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM custom_categories WHERE user_id = ? AND category = ?",
+            (user_id, category),
+        )
+        return cur.rowcount > 0
+
+
 def log_star_payment(user_id: int, amount: int, charge_id: str | None):
     """Registra cada pago con Stars que llega (primer pago o renovacion), para
     poder ver cuantas suscripciones y cuantas Stars se han cobrado en total."""

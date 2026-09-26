@@ -6,7 +6,9 @@ Comandos:
   /resumen             - menu para elegir el periodo (hoy, semana, mes,
                          un dia, un rango o todo) y ver un resumen completo:
                          ingresos/gastos, presupuestos y meta de ahorro
-  /categorias          - ve las categorias que se formaron segun tus registros
+  /categorias          - ve tus categorias y desde ahi crea una nueva o
+                         borra una que ya no uses (las predeterminadas no
+                         se pueden borrar)
   /presupuesto         - ve tus limites de gasto y desde ahi crea, actualiza
                          o borra un presupuesto (tambien acepta
                          /presupuesto comida 200 directo)
@@ -134,7 +136,7 @@ WELCOME = (
     "/resumen - 📊 elige el periodo (hoy, semana, mes, un dia, un rango o "
     "todo) y te doy un resumen completo: ingresos/gastos, presupuestos y meta\n"
     "/moneda USD - 💱 define tu moneda (ej. PEN, USD, MXN, EUR)\n"
-    "/categorias - 🏷️ ve las categorias que se formaron segun tus registros\n"
+    "/categorias - 🏷️ ve tus categorias y desde ahi crea una nueva o borra una\n"
     "/presupuesto - 🎯 ve tus limites y desde ahi crea, actualiza o borra "
     "uno (categoria libre, ej. \"curso de gastronomia\")\n"
     "/meta - 🐷 menu para crear tu meta de ahorro o aportar a ella\n"
@@ -172,7 +174,7 @@ WELCOME_EN = (
     "/resumen - 📊 pick a period (today, week, month, a day, a range or "
     "all-time) and get a full report: income/expenses, budgets and your goal\n"
     "/moneda USD - 💱 set your currency (e.g. PEN, USD, MXN, EUR)\n"
-    "/categorias - 🏷️ see the categories that formed from your own habits\n"
+    "/categorias - 🏷️ view your categories and create or delete one from there\n"
     "/presupuesto - 🎯 view your limits and from there create, update or "
     "delete one (free category label, e.g. \"cooking course\")\n"
     "/meta - 🐷 menu to create your savings goal or contribute to it\n"
@@ -279,6 +281,10 @@ PENDING_RECURRING_INPUT: dict[int, str] = {}
 # deuda nueva y le toca escribir "monto persona descripcion" en su proximo
 # mensaje.
 PENDING_DEBT_INPUT: dict[int, str] = {}
+
+# user_id -> True: cuando el usuario eligio "Crear categoria" desde
+# /categorias y le toca escribir el nombre en su proximo mensaje.
+PENDING_NEW_CATEGORY_INPUT: dict[int, bool] = {}
 
 
 def _t(lang: str, es: str, en: str) -> str:
@@ -650,22 +656,19 @@ async def cb_resumen_period(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.message(Command("categorias", ignore_case=True))
-async def cmd_categories(message: Message):
-    db.ensure_user(message.from_user.id, message.from_user.username)
-    rows = db.get_categories_summary(message.from_user.id)
-    currency = db.get_currency(message.from_user.id)
-    lang = db.get_language(message.from_user.id)
+def _categories_status_text(user_id: int, lang: str) -> str:
+    rows = db.get_categories_summary(user_id)
+    currency = db.get_currency(user_id)
 
     if not rows:
-        await message.answer(_t(
+        return _t(
             lang,
-            "Todavia no tienes categorias propias: se van formando segun lo "
-            "que registres. Prueba escribiendo algo como \"gaste 20 en almuerzo\".",
-            "You don't have any categories of your own yet: they form as you "
-            "log things. Try something like \"spent 20 on lunch\".",
-        ))
-        return
+            "Todavia no tienes categorias propias en tus registros: se van "
+            "formando segun lo que registres (o puedes crear una desde el "
+            "menu de abajo).",
+            "You don't have any categories in your entries yet: they form as "
+            "you log things (or you can create one from the menu below).",
+        )
 
     gastos = [r for r in rows if r["kind"] == "gasto"]
     ingresos = [r for r in rows if r["kind"] == "ingreso"]
@@ -687,7 +690,116 @@ async def cmd_categories(message: Message):
         "\nIf I ever ask and you mark a category as wrong, I'll fix it so this "
         "list better reflects your real habits.",
     ))
-    await message.answer("\n".join(lines))
+    return "\n".join(lines)
+
+
+@dp.message(Command("categorias", ignore_case=True))
+async def cmd_categories(message: Message):
+    user_id = message.from_user.id
+    db.ensure_user(user_id, message.from_user.username)
+    lang = db.get_language(user_id)
+
+    text = _categories_status_text(user_id, lang)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text=_t(lang, "➕ Crear categoria", "➕ Create category"), callback_data="categoriasmenu:crear"),
+            InlineKeyboardButton(text=_t(lang, "🗑️ Borrar una categoria", "🗑️ Delete a category"), callback_data="categoriasmenu:borrar"),
+        ]]
+    )
+    await message.answer(text, reply_markup=keyboard)
+
+
+@dp.callback_query(F.data.startswith("categoriasmenu:"))
+async def cb_categoriasmenu(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    lang = db.get_language(user_id)
+    choice = callback.data.split(":", 1)[1]
+
+    if choice == "crear":
+        PENDING_NEW_CATEGORY_INPUT[user_id] = True
+        if callback.message:
+            await callback.message.edit_text(_t(
+                lang,
+                "Escribe el nombre de la categoria nueva (ej. \"mascotas\").",
+                "Write the name of the new category (e.g. \"pets\").",
+            ))
+        await callback.answer()
+        return
+
+    if choice == "borrar":
+        custom = [c for c in db.get_custom_categories(user_id) if c not in VALID_CATEGORIES]
+        if not custom:
+            if callback.message:
+                await callback.message.edit_text(_t(
+                    lang,
+                    "No tienes categorias propias para borrar (las predeterminadas "
+                    "no se pueden quitar).",
+                    "You don't have any custom categories to delete (the default "
+                    "ones can't be removed).",
+                ))
+            await callback.answer()
+            return
+        rows = [
+            [InlineKeyboardButton(text=f"🗑️ {c}", callback_data=f"categoriasdel:{c}")]
+            for c in custom
+        ]
+        keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+        if callback.message:
+            await callback.message.edit_text(
+                _t(lang, "¿Cual categoria quieres borrar?", "Which category do you want to delete?"),
+                reply_markup=keyboard,
+            )
+        await callback.answer()
+        return
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("categoriasdel:"))
+async def cb_categoriasdel(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    lang = db.get_language(user_id)
+    category = callback.data.split(":", 1)[1]
+    deleted = db.delete_custom_category(user_id, category)
+    if callback.message:
+        if deleted:
+            await callback.message.edit_text(_t(
+                lang,
+                f"Listo, borre \"{category}\" de tu lista de categorias. Tus "
+                "registros y presupuestos que ya la usaban no cambian.",
+                f"Done, removed \"{category}\" from your category list. Your "
+                "existing entries and budgets that used it are unchanged.",
+            ))
+        else:
+            await callback.message.edit_text(_t(lang, "Esa categoria ya no esta en tu lista.", "That category is no longer in your list."))
+    await callback.answer()
+
+
+async def _process_new_category(message: Message, user_id: int, text: str) -> bool:
+    lang = db.get_language(user_id)
+    category = text.strip().lower()
+    if not category:
+        await message.answer(_t(lang, "Ese nombre no es valido, intenta de nuevo.", "That name isn't valid, try again."))
+        return False
+
+    existing = _user_categories(user_id)
+    if category in existing:
+        await message.answer(_t(
+            lang,
+            f"Ya tienes la categoria \"{category}\" en tu lista.",
+            f"You already have \"{category}\" in your category list.",
+        ))
+        return True
+
+    db.add_custom_category(user_id, category)
+    await message.answer(_t(
+        lang,
+        f"Listo, agregue \"{category}\" a tu lista de categorias. Ya te va a "
+        "aparecer junto a las demas cuando elijas una.",
+        f"Done, added \"{category}\" to your category list. You'll see it "
+        "alongside the rest whenever you pick one.",
+    ))
+    return True
 
 
 def _user_categories(user_id: int) -> list[str]:
@@ -2075,6 +2187,13 @@ async def handle_text(message: Message):
         ok = await _process_debt_creation(message, user_id, pending_debt, message.text)
         if not ok:
             PENDING_DEBT_INPUT[user_id] = pending_debt
+        return
+
+    pending_new_category = PENDING_NEW_CATEGORY_INPUT.pop(user_id, None)
+    if pending_new_category:
+        ok = await _process_new_category(message, user_id, message.text)
+        if not ok:
+            PENDING_NEW_CATEGORY_INPUT[user_id] = True
         return
 
     today = dt.datetime.utcnow().date().isoformat()
