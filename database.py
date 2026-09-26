@@ -717,7 +717,9 @@ def get_recent_star_payments(limit: int = 10):
 #
 # Es una promocion pagada por quien administra el bot (no un pozo con
 # dinero de otros usuarios): participa gratis cualquier usuario que llegue
-# al minimo de registros ese mes. sorteo_runs guarda un registro por mes
+# al minimo de registros EN TOTAL (de por vida -- no se reinicia cada mes,
+# asi que una vez que un usuario llega al minimo sigue participando en
+# todos los sorteos siguientes). sorteo_runs guarda un registro por mes
 # para no volver a sortear el mismo mes dos veces si el bot se reinicia.
 
 def get_username(user_id: int) -> str | None:
@@ -728,26 +730,24 @@ def get_username(user_id: int) -> str | None:
         return row["username"] if row else None
 
 
-def get_registro_counts_for_period(start_iso: str, end_iso: str):
-    """Cuantos movimientos (gastos/ingresos, incluye aportes a metas) registro
-    cada usuario en un rango [start_iso, end_iso)."""
+def get_registro_counts_total():
+    """Cuantos movimientos (gastos/ingresos) ha registrado cada usuario en
+    total, de por vida (sin filtro de fecha -- el conteo nunca se reinicia)."""
     with get_conn() as conn:
         return conn.execute(
             """
             SELECT user_id, COUNT(*) as n
             FROM transactions
-            WHERE created_at >= ? AND created_at < ?
             GROUP BY user_id
-            """,
-            (start_iso, end_iso),
+            """
         ).fetchall()
 
 
-def get_registro_count_since(user_id: int, start_iso: str) -> int:
+def get_registro_count_total(user_id: int) -> int:
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT COUNT(*) as n FROM transactions WHERE user_id = ? AND created_at >= ?",
-            (user_id, start_iso),
+            "SELECT COUNT(*) as n FROM transactions WHERE user_id = ?",
+            (user_id,),
         ).fetchone()
         return row["n"]
 
