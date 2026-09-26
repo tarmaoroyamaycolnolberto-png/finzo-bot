@@ -43,11 +43,14 @@ Sorteo mensual: el primer dia de cada mes se sortea SORTEO_PRIZE_USD dolares
 todos los usuarios -- gratis o suscritos -- que hayan acumulado al menos
 SORTEO_MIN_REGISTROS movimientos EN TOTAL (de por vida, no se reinicia cada
 mes: una vez que un usuario llega al minimo, sigue participando en todos los
-sorteos siguientes). No hace falta pagar nada para participar (nunca se
-cobra por un ticket ni existe un pozo comun), asi que es una promocion
-normal y no un juego de azar con dinero de terceros. El resultado solo se le
-avisa en privado a ADMIN_TELEGRAM_ID; el pago del premio se coordina fuera
-del bot.
+sorteos siguientes). Quien gana queda excluido de volver a ganar durante
+SORTEO_EXCLUSION_MONTHS meses (sigue participando gratis igual que
+cualquiera, la exclusion no se puede saltar pagando nada -- eso reintroduce
+"consideration" y lo volveria un juego de azar de pago). No hace falta pagar
+nada para participar (nunca se cobra por un ticket ni existe un pozo comun),
+asi que es una promocion normal y no un juego de azar con dinero de
+terceros. El resultado solo se le avisa en privado a ADMIN_TELEGRAM_ID; el
+pago del premio se coordina fuera del bot.
 """
 
 import asyncio
@@ -95,9 +98,13 @@ SUBSCRIPTION_PAYLOAD = "meow_premium_mensual"
 
 # Sorteo mensual: promocion pagada por quien administra el bot (no un juego
 # de azar con dinero de los usuarios). Participa gratis cualquier usuario
-# -- suscrito o no -- que llegue a este minimo de registros en el mes.
+# -- suscrito o no -- que llegue a este minimo de registros en total (de
+# por vida). Quien gana no puede volver a ganar durante los siguientes
+# SORTEO_EXCLUSION_MONTHS meses (sigue participando gratis, esa exclusion
+# nunca se puede saltar pagando -- eso lo volveria un juego de azar de pago).
 SORTEO_MIN_REGISTROS = 45
 SORTEO_PRIZE_USD = 50
+SORTEO_EXCLUSION_MONTHS = 2
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("finzo")
@@ -1440,7 +1447,23 @@ async def cmd_sorteo(message: Message):
     count = db.get_registro_count_total(user_id)
     restantes = max(0, SORTEO_MIN_REGISTROS - count)
 
-    if count >= SORTEO_MIN_REGISTROS:
+    now_utc = dt.datetime.utcnow()
+    peru_now = now_utc + dt.timedelta(hours=PERU_UTC_OFFSET)
+    if peru_now.month == 12:
+        next_year, next_month = peru_now.year + 1, 1
+    else:
+        next_year, next_month = peru_now.year, peru_now.month + 1
+    excluded_ids = db.get_recent_winner_ids(_recent_exclusion_month_keys(next_year, next_month))
+
+    if user_id in excluded_ids:
+        last_win = db.get_last_win_month(user_id)
+        progreso = (
+            f"🏆 Ganaste el sorteo de {last_win}, asi que quedas fuera de los "
+            f"proximos sorteos por {SORTEO_EXCLUSION_MONTHS} meses (vuelves a "
+            "poder ganar despues de eso). Sigues usando el bot gratis igual "
+            "que siempre, esto no se puede saltar pagando nada."
+        )
+    elif count >= SORTEO_MIN_REGISTROS:
         progreso = f"✅ Ya llevas {count} registros en total: estas participando en el sorteo."
     else:
         progreso = (
@@ -1453,8 +1476,10 @@ async def cmd_sorteo(message: Message):
         f"Cada mes sorteamos ${SORTEO_PRIZE_USD:.0f} entre quienes acumulen al menos "
         f"{SORTEO_MIN_REGISTROS} movimientos (gastos o ingresos) en total -- no hace "
         "falta lograrlo cada mes, es de por vida: una vez que llegas al minimo, "
-        "sigues participando en todos los sorteos siguientes. No hace falta pagar "
-        "nada ni estar suscrito, solo usar el bot con regularidad.\n\n"
+        "sigues participando en todos los sorteos siguientes. Quien gana no puede "
+        f"volver a ganar durante {SORTEO_EXCLUSION_MONTHS} meses. No hace falta "
+        "pagar nada ni estar suscrito para participar ni para esa espera, solo "
+        "usar el bot con regularidad.\n\n"
         f"{progreso}\n\n"
         "El sorteo se hace automaticamente el primer dia de cada mes. Si ganas, "
         "te contactamos para coordinar el premio."
@@ -1824,13 +1849,30 @@ def _seconds_until_next_month_start() -> float:
     return max((target_utc - now_utc).total_seconds(), 60)
 
 
+def _month_key_offset(year: int, month: int, offset: int) -> str:
+    """month_key de `offset` meses antes de (year, month). offset=1 es el
+    mes inmediatamente anterior, offset=2 el anterior a ese, etc."""
+    total = year * 12 + (month - 1) - offset
+    y, m = divmod(total, 12)
+    return f"{y:04d}-{m + 1:02d}"
+
+
+def _recent_exclusion_month_keys(year: int, month: int) -> list[str]:
+    """Los month_key de los ultimos SORTEO_EXCLUSION_MONTHS meses antes de
+    (year, month) -- quien gano en cualquiera de esos meses queda excluido
+    del sorteo de (year, month)."""
+    return [_month_key_offset(year, month, i) for i in range(1, SORTEO_EXCLUSION_MONTHS + 1)]
+
+
 async def _run_monthly_sorteo(bot: Bot):
     """Sortea SORTEO_PRIZE_USD entre quienes acumularon SORTEO_MIN_REGISTROS
     registros en total (de por vida, no se reinicia cada mes -- una vez que
     un usuario llega al minimo, queda participando en todos los sorteos
-    siguientes). Es dinero de quien administra el bot, no un pozo de otros
-    usuarios, y no hace falta pagar nada para participar. Solo le avisa al
-    admin, en privado; el pago se coordina fuera del bot."""
+    siguientes), excluyendo a quien haya ganado en los ultimos
+    SORTEO_EXCLUSION_MONTHS meses. Es dinero de quien administra el bot, no
+    un pozo de otros usuarios, y no hace falta pagar nada para participar ni
+    para saltarse la exclusion. Solo le avisa al admin, en privado; el pago
+    se coordina fuera del bot."""
     now_utc = dt.datetime.utcnow()
     peru_now = now_utc + dt.timedelta(hours=PERU_UTC_OFFSET)
     month_key = f"{peru_now.year:04d}-{peru_now.month:02d}"
@@ -1838,8 +1880,12 @@ async def _run_monthly_sorteo(bot: Bot):
     if db.has_sorteo_run(month_key):
         return
 
+    excluded_ids = db.get_recent_winner_ids(_recent_exclusion_month_keys(peru_now.year, peru_now.month))
     counts = db.get_registro_counts_total()
-    eligible = [c for c in counts if c["n"] >= SORTEO_MIN_REGISTROS]
+    eligible = [
+        c for c in counts
+        if c["n"] >= SORTEO_MIN_REGISTROS and c["user_id"] not in excluded_ids
+    ]
 
     if not eligible:
         db.record_sorteo_run(month_key, None, None, None)
@@ -1847,8 +1893,9 @@ async def _run_monthly_sorteo(bot: Bot):
             try:
                 await bot.send_message(
                     int(ADMIN_TELEGRAM_ID),
-                    f"🎟️ Sorteo de {month_key}: nadie llego todavia a los "
-                    f"{SORTEO_MIN_REGISTROS} registros minimos, asi que no hubo ganador.",
+                    f"🎟️ Sorteo de {month_key}: no hubo ganador (nadie llego a los "
+                    f"{SORTEO_MIN_REGISTROS} registros minimos, o los unicos que "
+                    "calificaban estan excluidos por haber ganado hace poco).",
                 )
             except Exception as exc:
                 logger.warning("No se pudo avisar al admin del sorteo (%s): %s", month_key, exc)

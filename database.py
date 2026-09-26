@@ -787,3 +787,34 @@ def get_sorteo_history(limit: int = 12):
         ).fetchall()
 
 
+def get_recent_winner_ids(month_keys: list[str]) -> set[int]:
+    """IDs de quienes ganaron en cualquiera de esos month_key -- se usa para
+    excluirlos temporalmente de un sorteo nuevo."""
+    if not month_keys:
+        return set()
+    placeholders = ",".join("?" for _ in month_keys)
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT winner_user_id FROM sorteo_runs
+            WHERE month_key IN ({placeholders}) AND winner_user_id IS NOT NULL
+            """,
+            month_keys,
+        ).fetchall()
+        return {r["winner_user_id"] for r in rows}
+
+
+def get_last_win_month(user_id: int) -> str | None:
+    """El month_key mas reciente en el que este usuario gano el sorteo, o
+    None si nunca ha ganado."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT month_key FROM sorteo_runs
+            WHERE winner_user_id = ? ORDER BY month_key DESC LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        return row["month_key"] if row else None
+
+
