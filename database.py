@@ -117,6 +117,16 @@ def init_db():
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS custom_categories (
+                user_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, category)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS star_payments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -614,6 +624,30 @@ def is_premium(user_id: int) -> bool:
     if not expires_at:
         return False
     return expires_at > datetime.utcnow().isoformat()
+
+
+# --- Categorias personalizadas -------------------------------------------
+#
+# Cuando el usuario escribe una categoria que no esta entre las
+# predeterminadas (con "Otra categoria" o al crear un presupuesto), se
+# guarda aqui para que la proxima vez aparezca junto a las predeterminadas
+# en vez de tener que volver a escribirla a mano.
+
+def add_custom_category(user_id: int, category: str):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO custom_categories (user_id, category) VALUES (?, ?)",
+            (user_id, category),
+        )
+
+
+def get_custom_categories(user_id: int):
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT category FROM custom_categories WHERE user_id = ? ORDER BY created_at",
+            (user_id,),
+        ).fetchall()
+        return [r["category"] for r in rows]
 
 
 def log_star_payment(user_id: int, amount: int, charge_id: str | None):

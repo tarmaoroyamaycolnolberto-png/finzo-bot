@@ -213,9 +213,14 @@ PENDING_SUMMARY_INPUT: dict[int, str] = {}
 PENDING_GOAL_INPUT: dict[int, str] = {}
 
 # user_id -> True: cuando el usuario eligio "Crear/actualizar presupuesto"
-# desde el menu de /presupuesto y le toca escribir "categoria monto" en su
-# proximo mensaje.
+# y despues "Otra categoria" (o uso el atajo /presupuesto), y le toca
+# escribir "categoria monto" en su proximo mensaje.
 PENDING_BUDGET_INPUT: dict[int, bool] = {}
+
+# user_id -> categoria: cuando el usuario ya eligio la categoria del
+# presupuesto desde la lista (predeterminadas + las suyas) y solo le falta
+# escribir el monto en su proximo mensaje.
+PENDING_BUDGET_AMOUNT: dict[int, str] = {}
 
 # codigo -> (emoji, titulo, descripcion)
 ACHIEVEMENTS = {
@@ -570,11 +575,49 @@ async def cmd_categories(message: Message):
     await message.answer("\n".join(lines))
 
 
+def _user_categories(user_id: int) -> list[str]:
+    """Categorias predeterminadas + las que el usuario fue agregando a mano
+    (con "Otra categoria" o al crear un presupuesto), sin duplicados."""
+    custom = [c for c in db.get_custom_categories(user_id) if c not in VALID_CATEGORIES]
+    return VALID_CATEGORIES + custom
+
+
+def _category_list_rows(user_id: int, callback_data_for) -> list[list[InlineKeyboardButton]]:
+    """Una fila por categoria (lista vertical, no una grilla), para que se
+    lea como una lista de opciones en vez de botones sueltos."""
+    return [
+        [InlineKeyboardButton(
+            text=CATEGORY_LABELS.get(c, c.capitalize()),
+            callback_data=callback_data_for(c),
+        )]
+        for c in _user_categories(user_id)
+    ]
+
+
+async def _save_budget(message: Message, user_id: int, category: str, limit_amount: float):
+    currency = db.get_currency(user_id)
+    db.set_budget(user_id, category, limit_amount)
+    if category not in VALID_CATEGORIES:
+        db.add_custom_category(user_id, category)
+
+    note = ""
+    if category not in VALID_CATEGORIES:
+        note = (
+            "\n\nComo \"{}\" no es una de las categorias que uso para clasificar tus "
+            "gastos automaticamente, este limite solo va a sumar los gastos que tu "
+            "asignes manualmente a esa categoria. La agregue a tu lista de "
+            "categorias para que la veas junto a las demas la proxima vez."
+        ).format(category)
+    label = CATEGORY_LABELS.get(category, category)
+    await message.answer(
+        f"Listo, tu limite mensual para \"{label}\" es {limit_amount:.2f} {currency}.{note}"
+    )
+
+
 async def _process_budget_creation(message: Message, user_id: int, args_text: str) -> bool:
     """Parsea "<categoria> <monto>" y crea/actualiza ese presupuesto.
     Devuelve True si se guardo, False si hubo un error de formato (y ya se
     le aviso)."""
-    currency = db.get_currency(user_id)
     parts = args_text.strip().rsplit(" ", 1)
     if len(parts) != 2:
         await message.answer(
@@ -593,18 +636,23 @@ async def _process_budget_creation(message: Message, user_id: int, args_text: st
         await message.answer("El monto no es valido. Ejemplo: \"comida 200\".")
         return False
 
-    db.set_budget(user_id, category, limit_amount)
-    note = ""
-    if category not in VALID_CATEGORIES:
-        note = (
-            "\n\nComo \"{}\" no es una de las categorias que uso para clasificar tus "
-            "gastos automaticamente, este limite solo va a sumar los gastos que tu "
-            "asignes manualmente a esa categoria (con el boton \"Otra categoria\" "
-            "cuando registres uno)."
-        ).format(category)
-    await message.answer(
-        f"Listo, tu limite mensual para \"{category}\" es {limit_amount:.2f} {currency}.{note}"
-    )
+    await _save_budget(message, user_id, category, limit_amount)
+    return True
+
+
+async def _process_budget_amount(message: Message, user_id: int, category: str, amount_text: str) -> bool:
+    """Como _process_budget_creation, pero la categoria ya se eligio de la
+    lista y solo falta parsear el monto que el usuario acaba de escribir."""
+    try:
+        limit_amount = float(amount_text.strip().split()[0].replace(",", "."))
+    except (ValueError, IndexError):
+        await message.answer("Monto invalido. Ejemplo: 200")
+        return False
+    if limit_amount <= 0:
+        await message.answer("El monto debe ser mayor que cero.")
+        return False
+
+    await _save_budget(message, user_id, category, limit_amount)
     return True
 
 
@@ -649,11 +697,13 @@ async def cb_presupuestomenu(callback: CallbackQuery):
     choice = callback.data.split(":", 1)[1]
 
     if choice == "crear":
-        PENDING_BUDGET_INPUT[user_id] = True
+        rows = _category_list_rows(user_id, lambda c: f"presupuestocat:{c}")
+        rows.append([InlineKeyboardButton(text="✏️ Otra categoria", callback_data="presupuestocat:otra")])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
         if callback.message:
             await callback.message.edit_text(
-                "Escribe la categoria y el monto, ej. \"comida 200\" o "
-                "\"curso de gastronomia 8000\"."
+                "¿Para cual categoria quieres poner o actualizar un limite?",
+                reply_markup=keyboard,
             )
         await callback.answer()
         return
@@ -662,6 +712,29 @@ async def cb_presupuestomenu(callback: CallbackQuery):
         await cb_delmenu_budgets(callback)
         return
 
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("presupuestocat:"))
+async def cb_presupuestocat(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    category = callback.data.split(":", 1)[1]
+
+    if category == "otra":
+        PENDING_BUDGET_INPUT[user_id] = True
+        if callback.message:
+            await callback.message.edit_text(
+                "Escribe la categoria y el monto, ej. \"curso de gastronomia 8000\"."
+            )
+        await callback.answer()
+        return
+
+    PENDING_BUDGET_AMOUNT[user_id] = category
+    if callback.message:
+        label = CATEGORY_LABELS.get(category, category.capitalize())
+        await callback.message.edit_text(
+            f"¿Cual es el limite mensual para \"{label}\"? Escribe el monto, ej. 200."
+        )
     await callback.answer()
 
 
@@ -1496,6 +1569,13 @@ async def handle_text(message: Message):
             PENDING_BUDGET_INPUT[user_id] = True
         return
 
+    pending_budget_category = PENDING_BUDGET_AMOUNT.pop(user_id, None)
+    if pending_budget_category is not None:
+        ok = await _process_budget_amount(message, user_id, pending_budget_category, message.text)
+        if not ok:
+            PENDING_BUDGET_AMOUNT[user_id] = pending_budget_category
+        return
+
     pending_goal = PENDING_GOAL_INPUT.pop(user_id, None)
     if pending_goal == "aportar":
         if db.get_goal(user_id) is None:
@@ -1520,7 +1600,11 @@ async def handle_text(message: Message):
             PENDING_CUSTOM_CATEGORY[user_id] = pending_tx_id
             return
         db.update_transaction_category(pending_tx_id, category)
-        await message.answer(f"Listo, lo cambie a la categoria \"{category}\".")
+        note = ""
+        if category not in VALID_CATEGORIES:
+            db.add_custom_category(user_id, category)
+            note = " La agregue a tu lista de categorias para la proxima vez."
+        await message.answer(f"Listo, lo cambie a la categoria \"{category}\".{note}")
         budgets = {b["category"]: b["limit_amount"] for b in db.get_budgets(user_id)}
         if category in budgets:
             await _check_budget_alert(message, user_id, category)
@@ -1581,11 +1665,8 @@ async def cb_category_ok(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("catno:"))
 async def cb_category_no(callback: CallbackQuery):
     tx_id = callback.data.split(":", 1)[1]
-    buttons = [
-        InlineKeyboardButton(text=CATEGORY_LABELS[c], callback_data=f"setcat:{tx_id}:{c}")
-        for c in VALID_CATEGORIES
-    ]
-    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    user_id = callback.from_user.id
+    rows = _category_list_rows(user_id, lambda c: f"setcat:{tx_id}:{c}")
     rows.append([InlineKeyboardButton(text="✏️ Otra categoria", callback_data=f"catother:{tx_id}")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
     if callback.message:
