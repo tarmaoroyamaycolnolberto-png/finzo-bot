@@ -136,6 +136,17 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sorteo_runs (
+                month_key TEXT PRIMARY KEY,
+                winner_user_id INTEGER,
+                winner_username TEXT,
+                registros INTEGER,
+                ran_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         # Migraciones suaves: agregan columnas nuevas si la base de datos
         # viene de una version anterior que no las tenia.
         for statement in (
@@ -698,6 +709,80 @@ def get_recent_star_payments(limit: int = 10):
     with get_conn() as conn:
         return conn.execute(
             "SELECT user_id, amount, created_at FROM star_payments ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+
+# --- Sorteo mensual -------------------------------------------------------
+#
+# Es una promocion pagada por quien administra el bot (no un pozo con
+# dinero de otros usuarios): participa gratis cualquier usuario que llegue
+# al minimo de registros ese mes. sorteo_runs guarda un registro por mes
+# para no volver a sortear el mismo mes dos veces si el bot se reinicia.
+
+def get_username(user_id: int) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT username FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return row["username"] if row else None
+
+
+def get_registro_counts_for_period(start_iso: str, end_iso: str):
+    """Cuantos movimientos (gastos/ingresos, incluye aportes a metas) registro
+    cada usuario en un rango [start_iso, end_iso)."""
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT user_id, COUNT(*) as n
+            FROM transactions
+            WHERE created_at >= ? AND created_at < ?
+            GROUP BY user_id
+            """,
+            (start_iso, end_iso),
+        ).fetchall()
+
+
+def get_registro_count_since(user_id: int, start_iso: str) -> int:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as n FROM transactions WHERE user_id = ? AND created_at >= ?",
+            (user_id, start_iso),
+        ).fetchone()
+        return row["n"]
+
+
+def has_sorteo_run(month_key: str) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sorteo_runs WHERE month_key = ?", (month_key,)
+        ).fetchone()
+        return row is not None
+
+
+def record_sorteo_run(
+    month_key: str,
+    winner_user_id: int | None,
+    winner_username: str | None,
+    registros: int | None,
+):
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO sorteo_runs (month_key, winner_user_id, winner_username, registros)
+            VALUES (?, ?, ?, ?)
+            """,
+            (month_key, winner_user_id, winner_username, registros),
+        )
+
+
+def get_sorteo_history(limit: int = 12):
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT month_key, winner_user_id, winner_username, registros
+            FROM sorteo_runs ORDER BY month_key DESC LIMIT ?
+            """,
             (limit,),
         ).fetchall()
 

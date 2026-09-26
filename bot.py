@@ -37,6 +37,15 @@ ingresos y aportes a metas cuentan igual). Al llegar al limite, puede seguir
 viendo resumenes/presupuestos/meta pero no anotar mas hasta suscribirse por
 SUBSCRIPTION_STARS Stars al mes (pago nativo de Telegram, moneda "XTR"), que
 se renueva solo cada 30 dias.
+
+Sorteo mensual: el primer dia de cada mes se sortea SORTEO_PRIZE_USD dolares
+(puestos por quien administra el bot, no por dinero de otros usuarios) entre
+todos los usuarios -- gratis o suscritos -- que hayan registrado al menos
+SORTEO_MIN_REGISTROS movimientos el mes anterior. No hace falta pagar nada
+para participar (nunca se cobra por un ticket ni existe un pozo comun), asi
+que es una promocion normal y no un juego de azar con dinero de terceros. El
+resultado solo se le avisa en privado a ADMIN_TELEGRAM_ID; el pago del
+premio se coordina fuera del bot.
 """
 
 import asyncio
@@ -46,6 +55,7 @@ import html
 import io
 import logging
 import os
+import random
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
@@ -81,6 +91,12 @@ SUBSCRIPTION_STARS = 99
 SUBSCRIPTION_PERIOD_SECONDS = 2592000  # 30 dias, el unico valor que Telegram acepta hoy
 SUBSCRIPTION_PAYLOAD = "meow_premium_mensual"
 
+# Sorteo mensual: promocion pagada por quien administra el bot (no un juego
+# de azar con dinero de los usuarios). Participa gratis cualquier usuario
+# -- suscrito o no -- que llegue a este minimo de registros en el mes.
+SORTEO_MIN_REGISTROS = 45
+SORTEO_PRIZE_USD = 50
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("finzo")
 
@@ -107,6 +123,7 @@ WELCOME = (
     "/logros - 🏅 ve las medallas que has ganado\n"
     "/mascota - 🐱 revisa el animo de Meow (sube si ahorras, baja si te pasas)\n"
     "/suscripcion - ⭐ revisa tus registros gratis restantes o tu suscripcion\n"
+    "/sorteo - 🎟️ mira tu progreso hacia el sorteo mensual de $50\n"
     "/feedback - 💬 mandame un comentario o reporte un problema\n"
     "/idioma en - 🌐 cambia el idioma (es/en)\n"
     "/ayuda - ❓ vuelve a mostrar este mensaje\n\n"
@@ -140,6 +157,7 @@ WELCOME_EN = (
     "/logros - 🏅 see the achievements you've earned\n"
     "/mascota - 🐱 check Meow's mood (goes up when you save, down when you overspend)\n"
     "/suscripcion - ⭐ check your free entries left or your subscription\n"
+    "/sorteo - 🎟️ check your progress toward the monthly $50 giveaway\n"
     "/feedback - 💬 send a comment or report a problem\n"
     "/idioma es - 🌐 switch language (es/en)\n"
     "/ayuda - ❓ show this message again\n\n"
@@ -162,6 +180,7 @@ BOT_COMMANDS = [
     BotCommand(command="logros", description="Ver tus medallas"),
     BotCommand(command="mascota", description="Ver el animo de Meow"),
     BotCommand(command="suscripcion", description="Ver tus registros gratis o suscribirte"),
+    BotCommand(command="sorteo", description="Ver tu progreso hacia el sorteo mensual de $50"),
     BotCommand(command="feedback", description="Enviar un comentario o reportar un problema"),
     BotCommand(command="idioma", description="Cambiar idioma (es/en)"),
     BotCommand(command="ayuda", description="Ver los comandos disponibles"),
@@ -1762,6 +1781,132 @@ async def weekly_summary_task(bot: Bot):
             await asyncio.sleep(3600)
 
 
+def _peru_month_bounds(year: int, month: int) -> tuple[dt.datetime, dt.datetime]:
+    """Limites [inicio, fin) en UTC de un mes calendario en hora de Peru."""
+    start_peru = dt.datetime(year, month, 1)
+    if month == 12:
+        end_peru = dt.datetime(year + 1, 1, 1)
+    else:
+        end_peru = dt.datetime(year, month + 1, 1)
+    start_utc = start_peru - dt.timedelta(hours=PERU_UTC_OFFSET)
+    end_utc = end_peru - dt.timedelta(hours=PERU_UTC_OFFSET)
+    return start_utc, end_utc
+
+
+def _seconds_until_next_month_start() -> float:
+    """Dia 1 de cada mes a las 00:05 hora de Peru, para correr el sorteo del mes anterior."""
+    now_utc = dt.datetime.utcnow()
+    peru_now = now_utc + dt.timedelta(hours=PERU_UTC_OFFSET)
+    if peru_now.month == 12:
+        next_month_start = dt.datetime(peru_now.year + 1, 1, 1, 0, 5)
+    else:
+        next_month_start = dt.datetime(peru_now.year, peru_now.month + 1, 1, 0, 5)
+    target_utc = next_month_start - dt.timedelta(hours=PERU_UTC_OFFSET)
+    return max((target_utc - now_utc).total_seconds(), 60)
+
+
+async def _run_monthly_sorteo(bot: Bot):
+    """Sortea SORTEO_PRIZE_USD entre quienes llegaron a SORTEO_MIN_REGISTROS
+    registros el mes anterior. Es dinero de quien administra el bot, no un
+    pozo de otros usuarios, y no hace falta pagar nada para participar. Solo
+    le avisa al admin, en privado; el pago se coordina fuera del bot."""
+    now_utc = dt.datetime.utcnow()
+    peru_now = now_utc + dt.timedelta(hours=PERU_UTC_OFFSET)
+    if peru_now.month == 1:
+        prev_year, prev_month = peru_now.year - 1, 12
+    else:
+        prev_year, prev_month = peru_now.year, peru_now.month - 1
+    month_key = f"{prev_year:04d}-{prev_month:02d}"
+
+    if db.has_sorteo_run(month_key):
+        return
+
+    start_utc, end_utc = _peru_month_bounds(prev_year, prev_month)
+    # Formato "YYYY-MM-DD HH:MM:SS" (con espacio, no "T") porque asi es como
+    # SQLite guarda CURRENT_TIMESTAMP en la columna created_at; comparar
+    # strings con separadores distintos hace que se pierdan registros del
+    # primer dia del rango (" " < "T" en ASCII).
+    counts = db.get_registro_counts_for_period(
+        start_utc.strftime("%Y-%m-%d %H:%M:%S"), end_utc.strftime("%Y-%m-%d %H:%M:%S")
+    )
+    eligible = [c for c in counts if c["n"] >= SORTEO_MIN_REGISTROS]
+
+    if not eligible:
+        db.record_sorteo_run(month_key, None, None, None)
+        if ADMIN_TELEGRAM_ID:
+            try:
+                await bot.send_message(
+                    int(ADMIN_TELEGRAM_ID),
+                    f"🎟️ Sorteo de {month_key}: nadie llego a los {SORTEO_MIN_REGISTROS} "
+                    "registros minimos este mes, asi que no hubo ganador.",
+                )
+            except Exception as exc:
+                logger.warning("No se pudo avisar al admin del sorteo (%s): %s", month_key, exc)
+        return
+
+    winner = random.choice(eligible)
+    winner_id = winner["user_id"]
+    username = db.get_username(winner_id)
+    db.record_sorteo_run(month_key, winner_id, username, winner["n"])
+
+    if ADMIN_TELEGRAM_ID:
+        handle = f"@{username}" if username else f"id {winner_id}"
+        try:
+            await bot.send_message(
+                int(ADMIN_TELEGRAM_ID),
+                f"🎉 Sorteo de {month_key}: gano {handle} con {winner['n']} registros "
+                f"ese mes. Coordina con esa persona el pago de ${SORTEO_PRIZE_USD:.0f}.",
+            )
+        except Exception as exc:
+            logger.warning("No se pudo avisar al admin del sorteo (%s): %s", month_key, exc)
+
+
+async def monthly_sorteo_task(bot: Bot):
+    """Cada 1 de mes, sortea $50 entre quienes llegaron a SORTEO_MIN_REGISTROS
+    registros el mes anterior (gratis o suscritos, no hace falta pagar para
+    participar). Solo le avisa al admin en privado; el pago se coordina
+    fuera del bot."""
+    while True:
+        try:
+            await asyncio.sleep(_seconds_until_next_month_start())
+            await _run_monthly_sorteo(bot)
+        except Exception as exc:
+            logger.warning("Fallo el ciclo del sorteo mensual, reintento en 1 hora: %s", exc)
+            await asyncio.sleep(3600)
+
+
+@dp.message(Command("sorteo", ignore_case=True))
+async def cmd_sorteo(message: Message):
+    user_id = message.from_user.id
+    db.ensure_user(user_id, message.from_user.username)
+
+    now_utc = dt.datetime.utcnow()
+    peru_now = now_utc + dt.timedelta(hours=PERU_UTC_OFFSET)
+    start_of_month_peru = dt.datetime(peru_now.year, peru_now.month, 1)
+    start_of_month_utc = start_of_month_peru - dt.timedelta(hours=PERU_UTC_OFFSET)
+    count = db.get_registro_count_since(user_id, start_of_month_utc.strftime("%Y-%m-%d %H:%M:%S"))
+    restantes = max(0, SORTEO_MIN_REGISTROS - count)
+
+    if count >= SORTEO_MIN_REGISTROS:
+        progreso = f"✅ Ya llevas {count} registros este mes: estas participando en el sorteo."
+    else:
+        progreso = (
+            f"Llevas {count}/{SORTEO_MIN_REGISTROS} registros este mes "
+            f"(te faltan {restantes} para entrar al sorteo)."
+        )
+
+    await message.answer(
+        f"🎟️ Sorteo mensual de Meow\n\n"
+        f"Cada mes sorteamos ${SORTEO_PRIZE_USD:.0f} entre quienes registren al menos "
+        f"{SORTEO_MIN_REGISTROS} movimientos (gastos o ingresos) ese mes. No hace "
+        "falta pagar nada ni estar suscrito, solo usar el bot con regularidad.\n\n"
+        f"{progreso}\n\n"
+        "El sorteo se hace automaticamente el primer dia de cada mes, entre "
+        "quienes cumplieron el mes anterior. Si ganas, te contactamos para "
+        "coordinar el premio."
+    )
+
+
 BOT_DESCRIPTION = (
     "🐾 ¡Hola! Soy Meow 💰✨ Te ayudo a controlar tus finanzas personales sin "
     "hojas de calculo ni apps complicadas. Solo cuentame que gastaste o "
@@ -1786,6 +1931,7 @@ async def main():
     except Exception as exc:
         logger.warning("No se pudo actualizar la descripcion del bot: %s", exc)
     asyncio.create_task(weekly_summary_task(bot))
+    asyncio.create_task(monthly_sorteo_task(bot))
     logger.info("Finzo esta corriendo...")
     await dp.start_polling(bot)
 
